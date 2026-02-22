@@ -205,18 +205,19 @@ function startCodex() {
   }, 500);
 }
 
-// Skip duplicate codex/event/* on server side to reduce bandwidth
-const SKIP_PREFIXES = [
-  "codex/event/",
-  "account/rateLimits/",
-  "thread/tokenUsage/",
-];
+// Whitelist — only forward events we care about
+const ALLOWED_METHODS = new Set([
+  "turn/started",
+  "turn/completed",
+  "turn/failed",
+  "item/agentMessage/delta",
+  "item/completed",
+  "item/created",
+]);
 
 function handleNotification(method, params) {
-  // Filter noisy duplicates server-side
-  for (const prefix of SKIP_PREFIXES) {
-    if (method.startsWith(prefix)) return;
-  }
+  // Only forward whitelisted events
+  if (!ALLOWED_METHODS.has(method)) return;
 
   const event = { method, params };
   pushEvent(event);
