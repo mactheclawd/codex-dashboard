@@ -23,7 +23,6 @@ body {
   line-height: 1.5;
   overflow: hidden;
   height: 100dvh;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
 /* Layout — Desktop */
@@ -311,7 +310,7 @@ body {
 @media (max-width: 768px) {
   .app {
     grid-template-columns: 1fr;
-    grid-template-rows: 52px 1fr 52px;
+    grid-template-rows: 52px 1fr auto;
     gap: 0;
   }
 
@@ -368,7 +367,8 @@ body {
 
   /* Footer — input bar with safe area */
   .footer {
-    padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
+    padding: 6px 10px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom, 34px));
     gap: 6px;
     border-top: 1px solid var(--border);
   }
