@@ -50,7 +50,11 @@ function handleMessage(msg) {
       if (!knownThreads.find((t) => t.id === msg.data.id)) {
         knownThreads.push(msg.data);
       }
+      activeThreadId = msg.data.id;
+      resetEventStream();
       renderThreadList();
+      $("#detail-thread").textContent = truncId(msg.data.id);
+      toggleSidebar(false);
       break;
     case "active-thread":
       activeThreadId = msg.data.threadId;
