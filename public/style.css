@@ -310,13 +310,14 @@ body {
 @media (max-width: 768px) {
   .app {
     grid-template-columns: 1fr;
-    grid-template-rows: 52px 1fr auto;
+    grid-template-rows: calc(52px + env(safe-area-inset-top, 0px)) 1fr auto;
     gap: 0;
   }
 
-  /* Header — compact */
+  /* Header — compact, clear the notch/status bar */
   .header {
     padding: 0 12px;
+    padding-top: env(safe-area-inset-top, 0px);
     gap: 8px;
   }
 
@@ -367,8 +368,8 @@ body {
 
   /* Footer — input bar with safe area */
   .footer {
-    padding: 6px 10px;
-    padding-bottom: max(10px, env(safe-area-inset-bottom, 34px));
+    padding: 8px 10px;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
     gap: 6px;
     border-top: 1px solid var(--border);
   }
