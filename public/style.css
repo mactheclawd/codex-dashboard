@@ -22,7 +22,8 @@ body {
   font-size: 14px;
   line-height: 1.5;
   overflow: hidden;
-  height: 100vh;
+  height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
 /* Layout — Desktop */
@@ -30,7 +31,7 @@ body {
   display: grid;
   grid-template-columns: 280px 1fr 320px;
   grid-template-rows: 48px 1fr 48px;
-  height: 100vh;
+  height: 100dvh;
   gap: 1px;
   background: var(--border);
 }
@@ -365,23 +366,24 @@ body {
     line-height: 1.5;
   }
 
-  /* Footer — input bar */
+  /* Footer — input bar with safe area */
   .footer {
-    padding: 0 8px;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
     gap: 6px;
     border-top: 1px solid var(--border);
   }
 
   .footer input {
-    font-size: 14px;
-    padding: 8px 12px;
-    border-radius: 20px;
+    font-size: 16px;
+    padding: 10px 14px;
+    border-radius: 22px;
+    -webkit-appearance: none;
   }
 
   .footer button {
-    padding: 8px 14px;
-    border-radius: 20px;
-    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: 22px;
+    font-size: 14px;
   }
 }
 
