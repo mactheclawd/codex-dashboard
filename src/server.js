@@ -3,23 +3,30 @@ import { createServer } from "http";
 import { readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "child_process";
+import readline from "readline";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-const CODEX_URL = process.env.CODEX_URL || "ws://127.0.0.1:4500";
 const PORT = process.env.PORT || 3111;
 
 // --- HTTP server for static files ---
 const httpServer = createServer((req, res) => {
-  if (req.url === "/" || req.url === "/index.html") {
-    res.writeHead(200, { "Content-Type": "text/html" });
-    res.end(readFileSync(join(__dirname, "../public/index.html")));
-  } else if (req.url === "/app.js") {
-    res.writeHead(200, { "Content-Type": "application/javascript" });
-    res.end(readFileSync(join(__dirname, "../public/app.js")));
-  } else if (req.url === "/style.css") {
-    res.writeHead(200, { "Content-Type": "text/css" });
-    res.end(readFileSync(join(__dirname, "../public/style.css")));
+  const files = {
+    "/": "index.html",
+    "/index.html": "index.html",
+    "/app.js": "app.js",
+    "/style.css": "style.css",
+  };
+  const types = {
+    html: "text/html",
+    js: "application/javascript",
+    css: "text/css",
+  };
+  const file = files[req.url];
+  if (file) {
+    const ext = file.split(".").pop();
+    res.writeHead(200, { "Content-Type": types[ext] || "text/plain" });
+    res.end(readFileSync(join(__dirname, "../public", file)));
   } else {
     res.writeHead(404);
     res.end("Not found");
@@ -43,10 +50,9 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (data) => {
-    // Handle commands from browser (e.g., send prompt to Codex)
     try {
       const msg = JSON.parse(data);
-      if (msg.type === "prompt" && codexWs?.readyState === WebSocket.OPEN) {
+      if (msg.type === "prompt" && codexProc) {
         sendToCodex("turn/start", {
           threadId: agentState.activeThreadId,
           input: [{ type: "text", text: msg.text }],
@@ -73,7 +79,7 @@ const agentState = {
   activeThreadId: null,
   activeTurnId: null,
   threads: {},
-  events: [], // rolling log of recent events
+  events: [],
 };
 
 function pushEvent(event) {
@@ -82,15 +88,18 @@ function pushEvent(event) {
   broadcast({ type: "event", data: event });
 }
 
-// --- Codex app-server connection ---
-let codexWs = null;
+// --- Codex app-server via stdio ---
+let codexProc = null;
+let codexRl = null;
 let rpcId = 100;
 const pendingRequests = new Map();
 
 function sendToCodex(method, params = {}) {
   const id = rpcId++;
   const msg = { method, id, params };
-  codexWs.send(JSON.stringify(msg));
+  const line = JSON.stringify(msg);
+  console.log("[codex] →", line);
+  codexProc.stdin.write(line + "\n");
   return new Promise((resolve, reject) => {
     pendingRequests.set(id, { resolve, reject });
     setTimeout(() => {
@@ -102,49 +111,32 @@ function sendToCodex(method, params = {}) {
   });
 }
 
-function connectToCodex() {
-  console.log(`[codex] Connecting to ${CODEX_URL}...`);
-  codexWs = new WebSocket(CODEX_URL);
+function sendNotification(method, params = {}) {
+  const msg = { method, params };
+  const line = JSON.stringify(msg);
+  console.log("[codex] →", line);
+  codexProc.stdin.write(line + "\n");
+}
 
-  codexWs.on("open", async () => {
-    console.log("[codex] Connected to app-server");
-    agentState.connected = true;
-    broadcast({ type: "status", data: { connected: true } });
+function startCodex() {
+  console.log("[codex] Spawning app-server (stdio)...");
 
-    try {
-      // Initialize handshake
-      await sendToCodex("initialize", {
-        clientInfo: {
-          name: "codex_dashboard",
-          title: "Codex Dashboard",
-          version: "0.1.0",
-        },
-      });
-      codexWs.send(JSON.stringify({ method: "initialized", params: {} }));
-      console.log("[codex] Handshake complete");
-
-      // Start a thread
-      const result = await sendToCodex("thread/start", {
-        model: "gpt-5.1-codex",
-      });
-      if (result?.thread?.id) {
-        agentState.activeThreadId = result.thread.id;
-        agentState.threads[result.thread.id] = {
-          id: result.thread.id,
-          turns: [],
-          createdAt: Date.now(),
-        };
-        console.log(`[codex] Thread started: ${result.thread.id}`);
-        broadcast({ type: "thread", data: agentState.threads[result.thread.id] });
-      }
-    } catch (e) {
-      console.error("[codex] Handshake failed:", e.message);
-    }
+  codexProc = spawn("codex", ["app-server"], {
+    stdio: ["pipe", "pipe", "pipe"],
   });
 
-  codexWs.on("message", (raw) => {
+  codexRl = readline.createInterface({ input: codexProc.stdout });
+
+  // Log stderr
+  codexProc.stderr.on("data", (chunk) => {
+    const text = chunk.toString().trim();
+    if (text) console.log("[codex stderr]", text);
+  });
+
+  codexRl.on("line", (line) => {
+    console.log("[codex] ←", line);
     try {
-      const msg = JSON.parse(raw);
+      const msg = JSON.parse(line);
 
       // RPC response
       if (msg.id !== undefined && pendingRequests.has(msg.id)) {
@@ -155,26 +147,62 @@ function connectToCodex() {
         return;
       }
 
-      // Notification (no id)
+      // Notification
       if (msg.method) {
         handleNotification(msg.method, msg.params || {});
       }
     } catch (e) {
-      console.error("[codex] Parse error:", e.message);
+      console.error("[codex] Parse error:", e.message, "line:", line);
     }
   });
 
-  codexWs.on("close", () => {
-    console.log("[codex] Disconnected from app-server");
+  codexProc.on("close", (code) => {
+    console.log(`[codex] Process exited with code ${code}`);
     agentState.connected = false;
     broadcast({ type: "status", data: { connected: false } });
-    // Reconnect after delay
-    setTimeout(connectToCodex, 3000);
+    // Restart after delay
+    setTimeout(startCodex, 3000);
   });
 
-  codexWs.on("error", (err) => {
-    console.error("[codex] WebSocket error:", err.message);
-  });
+  // Initialize handshake
+  setTimeout(async () => {
+    try {
+      const result = await sendToCodex("initialize", {
+        clientInfo: {
+          name: "codex_dashboard",
+          title: "Codex Dashboard",
+          version: "0.1.0",
+        },
+      });
+      console.log("[codex] Initialize result:", JSON.stringify(result));
+
+      sendNotification("initialized");
+      console.log("[codex] Handshake complete");
+
+      agentState.connected = true;
+      broadcast({ type: "status", data: { connected: true } });
+
+      // Start a thread
+      const threadResult = await sendToCodex("thread/start", {
+        model: "gpt-5.1-codex",
+      });
+      if (threadResult?.thread?.id) {
+        agentState.activeThreadId = threadResult.thread.id;
+        agentState.threads[threadResult.thread.id] = {
+          id: threadResult.thread.id,
+          turns: [],
+          createdAt: Date.now(),
+        };
+        console.log(`[codex] Thread started: ${threadResult.thread.id}`);
+        broadcast({
+          type: "thread",
+          data: agentState.threads[threadResult.thread.id],
+        });
+      }
+    } catch (e) {
+      console.error("[codex] Handshake failed:", e.message);
+    }
+  }, 500);
 }
 
 function handleNotification(method, params) {
@@ -189,13 +217,6 @@ function handleNotification(method, params) {
     case "turn/failed":
       agentState.activeTurnId = null;
       break;
-    case "item/created":
-    case "item/updated":
-      // These contain file edits, command runs, messages, etc.
-      break;
-    case "item/stream/delta":
-      // Streaming content — forward as-is for live rendering
-      break;
   }
 
   broadcast({ type: "notification", data: event });
@@ -204,5 +225,5 @@ function handleNotification(method, params) {
 // --- Start ---
 httpServer.listen(PORT, () => {
   console.log(`[dashboard] UI at http://localhost:${PORT}`);
-  connectToCodex();
+  startCodex();
 });
