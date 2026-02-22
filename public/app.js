@@ -157,18 +157,19 @@ function addEvent(event, bulk = false) {
 }
 
 function shouldSkipEvent(method, params) {
-  // Skip ALL codex/event/* — duplicates of item/*/turn/* events
+  // Skip duplicates
   if (method.startsWith("codex/event/")) return true;
-  // Skip thread-level noise
   if (method === "thread/started") return true;
   if (method === "thread/tokenUsage/updated") return true;
   if (method === "account/rateLimits/updated") return true;
-  // Skip item lifecycle noise
-  if (method === "item/started") return true;
-  if (method === "item/created") return true;
-  // Show reasoning/thinking events (collapsible cards)
-  // Skip user message echo (we already show it from prompt input)
+  // Skip user message echo
   if (method === "item/completed" && params.item?.type === "userMessage") return true;
+  // Skip item/created — we use item/started and item/completed instead
+  if (method === "item/created") return true;
+  // Skip agentMessage started — deltas handle streaming
+  if (method === "item/started" && params.item?.type === "agentMessage") return true;
+  // Skip reasoning part-added (we stream via summaryTextDelta)
+  if (method === "item/reasoning/summaryPartAdded") return true;
   return false;
 }
 
@@ -265,9 +266,8 @@ function formatEvent(method, params) {
   // Streaming delta — agent typing
   if (method === "item/agentMessage/delta") {
     const delta = params.delta || "";
-    // Append to last agent message card if exists
-    appendDelta(delta);
-    return null; // handled by appendDelta
+    appendDelta(delta, params.itemId);
+    return null;
   }
 
   // Item completed
@@ -284,21 +284,29 @@ function formatEvent(method, params) {
         body: `${status}`,
       };
     }
-    // Agent message completed — if we were streaming, finalize. Otherwise show it.
-    if (item.type === "agentMessage" && item.text) {
-      // If we have a streaming card, just leave it (already has the text)
+    // Agent message completed — check if we already streamed it
+    if (item.type === "agentMessage") {
       if (lastAgentCard) {
-        lastAgentCard = null; // reset for next message
+        // Already streamed — just finalize
+        const textEl = lastAgentCard.querySelector(".streaming-text");
+        if (textEl && item.text) textEl.textContent = item.text;
+        lastAgentCard = null;
         return null;
       }
-      // Otherwise show the full message
-      return {
-        category: "agent",
-        cardClass: "agent-message",
-        icon: "🤖",
-        label: "Codex",
-        body: `<span class="msg-text">${escHtml(item.text)}</span>`,
-      };
+      // Check if we already have a streaming card for this item id
+      const existingCard = document.querySelector(`[data-item-id="${item.id}"]`);
+      if (existingCard) return null;
+      // No streaming card — show full message
+      if (item.text) {
+        return {
+          category: "agent",
+          cardClass: "agent-message",
+          icon: "🤖",
+          label: "Codex",
+          body: `<span class="msg-text">${escHtml(item.text)}</span>`,
+        };
+      }
+      return null;
     }
     return null;
   }
@@ -315,15 +323,64 @@ function formatEvent(method, params) {
     };
   }
 
-  // Thinking / reasoning
-  if (method.startsWith("reasoning/") || method === "item/thinking" || method === "item/agentMessage/thinking") {
-    const text = params.text || params.summary || params.content || JSON.stringify(params);
+  // Reasoning streaming delta — append to thinking card
+  if (method === "item/reasoning/summaryTextDelta") {
+    const delta = params.delta || "";
+    appendThinking(delta, params.itemId);
+    return null;
+  }
+
+  // Reasoning item started — create collapsible thinking card
+  if (method === "item/started" && params.item?.type === "reasoning") {
+    lastThinkingCard = null; // reset for new reasoning block
     return {
       category: "stream",
       cardClass: "thinking-card collapsible",
       icon: "💭",
       label: "Thinking",
-      body: `${escHtml(typeof text === "string" ? text : JSON.stringify(text))}`,
+      body: `<span class="thinking-text"></span>`,
+      collapsible: true,
+    };
+  }
+
+  // Reasoning item completed — finalize thinking card
+  if (method === "item/completed" && params.item?.type === "reasoning") {
+    const summary = (params.item.summary || []).join(" ");
+    if (lastThinkingCard) {
+      const textEl = lastThinkingCard.querySelector(".thinking-text");
+      if (textEl && summary) textEl.textContent = summary;
+      lastThinkingCard = null;
+    }
+    return null;
+  }
+
+  // Web search started
+  if (method === "item/started" && params.item?.type === "webSearch") {
+    const query = params.item.query || "";
+    return {
+      category: "stream",
+      cardClass: "tool-call-card collapsible",
+      icon: "🔍",
+      label: "Web Search",
+      body: query ? `<span class="tool-name">${escHtml(query)}</span>` : `<span class="tool-args">Searching...</span>`,
+      collapsible: true,
+    };
+  }
+
+  // Web search completed
+  if (method === "item/completed" && params.item?.type === "webSearch") {
+    const query = params.item.query || "";
+    const action = params.item.action;
+    let body = escHtml(query);
+    if (action?.type === "openPage" && action.url) {
+      body += `\n<span class="tool-args">→ ${escHtml(action.url)}</span>`;
+    }
+    return {
+      category: "stream",
+      cardClass: "tool-call-card collapsible",
+      icon: "🔍",
+      label: "Search done",
+      body,
       collapsible: true,
     };
   }
@@ -399,14 +456,28 @@ function formatEvent(method, params) {
 
 // Append streaming delta to the last agent message
 let lastAgentCard = null;
+let lastThinkingCard = null;
 
-function appendDelta(delta) {
+function appendThinking(delta, itemId) {
+  const stream = $("#event-stream");
+  if (!lastThinkingCard || !stream.contains(lastThinkingCard)) {
+    // Find the most recent thinking card
+    const cards = stream.querySelectorAll(".thinking-card");
+    lastThinkingCard = cards.length ? cards[cards.length - 1] : null;
+  }
+  if (lastThinkingCard) {
+    const textEl = lastThinkingCard.querySelector(".thinking-text");
+    if (textEl) textEl.textContent += delta;
+  }
+}
+
+function appendDelta(delta, itemId) {
   const stream = $("#event-stream");
   if (!lastAgentCard || !stream.contains(lastAgentCard)) {
-    // Create a new streaming card
     if (stream.querySelector(".empty-state")) stream.innerHTML = "";
     lastAgentCard = document.createElement("div");
     lastAgentCard.className = "event-card agent-message";
+    if (itemId) lastAgentCard.dataset.itemId = itemId;
     lastAgentCard.innerHTML = `
       <div class="event-header">
         <span class="event-type agent">🤖 Codex</span>

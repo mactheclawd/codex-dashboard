@@ -205,19 +205,11 @@ function startCodex() {
   }, 500);
 }
 
-// Whitelist — only forward events we care about
-const ALLOWED_METHODS = new Set([
-  "turn/started",
-  "turn/completed",
-  "turn/failed",
-  "item/agentMessage/delta",
-  "item/completed",
-  "item/created",
-]);
-
 function handleNotification(method, params) {
-  // Only forward whitelisted events
-  if (!ALLOWED_METHODS.has(method)) return;
+  // Skip codex/event/* duplicates and noisy account/thread-level updates
+  if (method.startsWith("codex/event/")) return;
+  if (method === "account/rateLimits/updated") return;
+  if (method === "thread/tokenUsage/updated") return;
 
   const event = { method, params };
   pushEvent(event);
