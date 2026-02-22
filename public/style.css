@@ -15,7 +15,11 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body {
+html {
+  height: 100%;
+}
+
+body {
   background: var(--bg-card);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -23,7 +27,11 @@ html, body {
   line-height: 1.5;
   overflow: hidden;
   height: 100%;
-  min-height: 100dvh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
 }
 
 /* Layout — Desktop */
@@ -31,7 +39,7 @@ html, body {
   display: grid;
   grid-template-columns: 280px 1fr 320px;
   grid-template-rows: 48px 1fr 48px;
-  height: 100dvh;
+  height: 100%;
   gap: 1px;
   background: var(--border);
 }
@@ -367,12 +375,12 @@ html, body {
     line-height: 1.5;
   }
 
-  /* Footer — input bar with safe area */
+  /* Footer — input bar */
   .footer {
-    padding: 8px 10px;
-    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    padding: 8px 10px 8px;
     gap: 6px;
     border-top: 1px solid var(--border);
+    margin-bottom: 0;
   }
 
   .footer input {
