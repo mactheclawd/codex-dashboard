@@ -135,6 +135,10 @@ function addEvent(event, bulk = false) {
   const method = event.method || "unknown";
   const params = event.params || {};
 
+  // Only show events for the active thread (unless it's a user/prompt we just sent)
+  const eventThreadId = event._threadId || params.threadId || params.turn?.threadId;
+  if (eventThreadId && eventThreadId !== activeThreadId && method !== "user/prompt") return;
+
   // Deduplicate
   const itemId = params.item?.id || params.itemId;
   const turnId = params.turn?.id || params.turnId;
@@ -436,7 +440,7 @@ function sendPrompt() {
   const input = $("#prompt-input");
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "prompt", text }));
+  ws.send(JSON.stringify({ type: "prompt", text, threadId: activeThreadId }));
   input.value = "";
   lastAgentCard = null;
   addEvent({ method: "user/prompt", params: { text }, timestamp: Date.now() });

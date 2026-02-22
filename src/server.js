@@ -118,8 +118,11 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === "prompt" && codexProc && agentState.activeThreadId) {
-        const tid = agentState.activeThreadId;
+      if (msg.type === "prompt" && codexProc) {
+        const tid = msg.threadId || agentState.activeThreadId;
+        if (!tid) return;
+        // Persist user prompt to the thread's JSONL
+        appendEvent(tid, { method: "user/prompt", params: { text: msg.text, threadId: tid }, timestamp: Date.now() });
         sendToCodex("turn/start", {
           threadId: tid,
           input: [{ type: "text", text: msg.text }],
@@ -135,13 +138,11 @@ wss.on("connection", (ws) => {
       } else if (msg.type === "switch-thread") {
         const threadId = msg.threadId;
         if (agentState.threads[threadId]) {
-          agentState.activeThreadId = threadId;
           const events = loadEvents(threadId);
           ws.send(JSON.stringify({
             type: "thread-events",
             data: { threadId, events },
           }));
-          broadcast({ type: "active-thread", data: { threadId } });
         }
       } else if (msg.type === "load-thread") {
         // Client requesting events for a specific thread
@@ -183,11 +184,14 @@ for (const id of loadAllThreadIds()) {
 console.log(`[dashboard] Loaded ${Object.keys(agentState.threads).length} persisted threads`);
 
 function pushEvent(event) {
-  // Persist to active thread's JSONL
-  if (agentState.activeThreadId) {
-    appendEvent(agentState.activeThreadId, { ...event, timestamp: Date.now() });
+  const timestamped = { ...event, timestamp: Date.now() };
+  // Persist to the correct thread using threadId from event params
+  const threadId = event.params?.threadId || event.params?.turn?.threadId || agentState.activeThreadId;
+  if (threadId) {
+    appendEvent(threadId, timestamped);
   }
-  broadcast({ type: "event", data: { ...event, timestamp: Date.now() } });
+  // Include threadId in broadcast so client can route correctly
+  broadcast({ type: "event", data: { ...timestamped, _threadId: threadId } });
 }
 
 // --- Codex app-server via stdio ---
