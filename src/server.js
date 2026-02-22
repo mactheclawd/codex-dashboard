@@ -1,13 +1,41 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, appendFileSync, readFileSync as readF } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
+import { homedir } from "os";
 import readline from "readline";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3111;
+
+// --- Persistence ---
+const THREADS_DIR = join(homedir(), ".codex-dashboard", "threads");
+mkdirSync(THREADS_DIR, { recursive: true });
+
+function threadFilePath(threadId) {
+  // sanitize threadId for filesystem
+  const safe = threadId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return join(THREADS_DIR, `${safe}.jsonl`);
+}
+
+function appendEvent(threadId, event) {
+  const line = JSON.stringify(event) + "\n";
+  appendFileSync(threadFilePath(threadId), line);
+}
+
+function loadEvents(threadId) {
+  const fp = threadFilePath(threadId);
+  if (!existsSync(fp)) return [];
+  const lines = readFileSync(fp, "utf-8").split("\n").filter(Boolean);
+  return lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+}
+
+function loadAllThreadIds() {
+  const files = readdirSync(THREADS_DIR).filter((f) => f.endsWith(".jsonl"));
+  return files.map((f) => f.replace(/\.jsonl$/, ""));
+}
 
 // --- HTTP server for static files ---
 const httpServer = createServer((req, res) => {
@@ -41,8 +69,30 @@ wss.on("connection", (ws) => {
   console.log("[dashboard] Browser client connected");
   browserClients.add(ws);
 
-  // Send current state
-  ws.send(JSON.stringify({ type: "state", data: agentState }));
+  // Send thread list and active thread info
+  const threadIds = Object.keys(agentState.threads);
+  const threadList = threadIds.map((id) => ({
+    id,
+    createdAt: agentState.threads[id].createdAt,
+  }));
+
+  ws.send(JSON.stringify({
+    type: "init",
+    data: {
+      connected: agentState.connected,
+      activeThreadId: agentState.activeThreadId,
+      threads: threadList,
+    },
+  }));
+
+  // If there's an active thread, send its events
+  if (agentState.activeThreadId) {
+    const events = loadEvents(agentState.activeThreadId);
+    ws.send(JSON.stringify({
+      type: "thread-events",
+      data: { threadId: agentState.activeThreadId, events },
+    }));
+  }
 
   ws.on("close", () => {
     browserClients.delete(ws);
@@ -52,11 +102,32 @@ wss.on("connection", (ws) => {
   ws.on("message", (data) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === "prompt" && codexProc) {
+      if (msg.type === "prompt" && codexProc && agentState.activeThreadId) {
         sendToCodex("turn/start", {
           threadId: agentState.activeThreadId,
           input: [{ type: "text", text: msg.text }],
         });
+      } else if (msg.type === "new-thread") {
+        createNewThread();
+      } else if (msg.type === "switch-thread") {
+        const threadId = msg.threadId;
+        if (agentState.threads[threadId]) {
+          agentState.activeThreadId = threadId;
+          const events = loadEvents(threadId);
+          ws.send(JSON.stringify({
+            type: "thread-events",
+            data: { threadId, events },
+          }));
+          broadcast({ type: "active-thread", data: { threadId } });
+        }
+      } else if (msg.type === "load-thread") {
+        // Client requesting events for a specific thread
+        const threadId = msg.threadId;
+        const events = loadEvents(threadId);
+        ws.send(JSON.stringify({
+          type: "thread-events",
+          data: { threadId, events },
+        }));
       }
     } catch (e) {
       console.error("[dashboard] Bad message from browser:", e.message);
@@ -79,13 +150,20 @@ const agentState = {
   activeThreadId: null,
   activeTurnId: null,
   threads: {},
-  events: [],
 };
 
+// Load persisted threads on startup
+for (const id of loadAllThreadIds()) {
+  agentState.threads[id] = { id, createdAt: null };
+}
+console.log(`[dashboard] Loaded ${Object.keys(agentState.threads).length} persisted threads`);
+
 function pushEvent(event) {
-  agentState.events.push({ ...event, timestamp: Date.now() });
-  if (agentState.events.length > 500) agentState.events.shift();
-  broadcast({ type: "event", data: event });
+  // Persist to active thread's JSONL
+  if (agentState.activeThreadId) {
+    appendEvent(agentState.activeThreadId, { ...event, timestamp: Date.now() });
+  }
+  broadcast({ type: "event", data: { ...event, timestamp: Date.now() } });
 }
 
 // --- Codex app-server via stdio ---
@@ -118,6 +196,28 @@ function sendNotification(method, params = {}) {
   codexProc.stdin.write(line + "\n");
 }
 
+async function createNewThread() {
+  if (!codexProc || !agentState.connected) return;
+  try {
+    const threadResult = await sendToCodex("thread/start", {
+      model: "gpt-5.1-codex",
+    });
+    if (threadResult?.thread?.id) {
+      const id = threadResult.thread.id;
+      const threadInfo = { id, createdAt: Date.now() };
+      agentState.threads[id] = threadInfo;
+      agentState.activeThreadId = id;
+      // Touch the JSONL file so it persists
+      appendEvent(id, { method: "thread/created", params: { threadId: id }, timestamp: Date.now() });
+      console.log(`[codex] New thread: ${id}`);
+      broadcast({ type: "new-thread", data: threadInfo });
+      broadcast({ type: "active-thread", data: { threadId: id } });
+    }
+  } catch (e) {
+    console.error("[codex] Failed to create thread:", e.message);
+  }
+}
+
 function startCodex() {
   console.log("[codex] Spawning app-server (stdio)...");
 
@@ -127,7 +227,6 @@ function startCodex() {
 
   codexRl = readline.createInterface({ input: codexProc.stdout });
 
-  // Log stderr
   codexProc.stderr.on("data", (chunk) => {
     const text = chunk.toString().trim();
     if (text) console.log("[codex stderr]", text);
@@ -138,7 +237,6 @@ function startCodex() {
     try {
       const msg = JSON.parse(line);
 
-      // RPC response
       if (msg.id !== undefined && pendingRequests.has(msg.id)) {
         const { resolve, reject } = pendingRequests.get(msg.id);
         pendingRequests.delete(msg.id);
@@ -147,7 +245,6 @@ function startCodex() {
         return;
       }
 
-      // Notification
       if (msg.method) {
         handleNotification(msg.method, msg.params || {});
       }
@@ -160,18 +257,17 @@ function startCodex() {
     console.log(`[codex] Process exited with code ${code}`);
     agentState.connected = false;
     broadcast({ type: "status", data: { connected: false } });
-    // Restart after delay
     setTimeout(startCodex, 3000);
   });
 
-  // Initialize handshake
+  // Initialize handshake — but don't auto-create a thread
   setTimeout(async () => {
     try {
       const result = await sendToCodex("initialize", {
         clientInfo: {
           name: "codex_dashboard",
           title: "Codex Dashboard",
-          version: "0.1.0",
+          version: "0.2.0",
         },
       });
       console.log("[codex] Initialize result:", JSON.stringify(result));
@@ -182,22 +278,9 @@ function startCodex() {
       agentState.connected = true;
       broadcast({ type: "status", data: { connected: true } });
 
-      // Start a thread
-      const threadResult = await sendToCodex("thread/start", {
-        model: "gpt-5.1-codex",
-      });
-      if (threadResult?.thread?.id) {
-        agentState.activeThreadId = threadResult.thread.id;
-        agentState.threads[threadResult.thread.id] = {
-          id: threadResult.thread.id,
-          turns: [],
-          createdAt: Date.now(),
-        };
-        console.log(`[codex] Thread started: ${threadResult.thread.id}`);
-        broadcast({
-          type: "thread",
-          data: agentState.threads[threadResult.thread.id],
-        });
+      // If no threads exist, create one automatically for convenience
+      if (Object.keys(agentState.threads).length === 0) {
+        await createNewThread();
       }
     } catch (e) {
       console.error("[codex] Handshake failed:", e.message);
@@ -206,7 +289,6 @@ function startCodex() {
 }
 
 function handleNotification(method, params) {
-  // Skip codex/event/* duplicates and noisy account/thread-level updates
   if (method.startsWith("codex/event/")) return;
   if (method === "account/rateLimits/updated") return;
   if (method === "thread/tokenUsage/updated") return;

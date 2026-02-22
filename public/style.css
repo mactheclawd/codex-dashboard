@@ -97,12 +97,36 @@ body {
   padding: 12px;
 }
 
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
 .sidebar h2 {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-dim);
-  margin-bottom: 8px;
+  margin-bottom: 0;
+}
+
+#new-thread-btn {
+  background: var(--bg);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#new-thread-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
 }
 
 .thread-item {

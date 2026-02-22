@@ -5,7 +5,11 @@ const startTime = Date.now();
 let eventCount = 0;
 let ws = null;
 const recentFiles = new Set();
-const seenEventKeys = new Set(); // deduplicate events
+const seenEventKeys = new Set();
+
+// Thread state
+let activeThreadId = null;
+let knownThreads = []; // [{id, createdAt}]
 
 // Streaming state
 let lastAgentCard = null;
@@ -26,26 +30,79 @@ function connect() {
 
 function handleMessage(msg) {
   switch (msg.type) {
-    case "state": applyState(msg.data); break;
-    case "status": updateConnection(msg.data.connected); break;
+    case "init":
+      updateConnection(msg.data.connected);
+      knownThreads = msg.data.threads || [];
+      activeThreadId = msg.data.activeThreadId;
+      renderThreadList();
+      break;
+    case "status":
+      updateConnection(msg.data.connected);
+      break;
+    case "thread-events":
+      // Full event replay for a thread
+      if (msg.data.threadId === activeThreadId) {
+        resetEventStream();
+        msg.data.events.forEach((e) => addEvent(e, true));
+      }
+      break;
+    case "new-thread":
+      if (!knownThreads.find((t) => t.id === msg.data.id)) {
+        knownThreads.push(msg.data);
+      }
+      renderThreadList();
+      break;
+    case "active-thread":
+      activeThreadId = msg.data.threadId;
+      $("#detail-thread").textContent = truncId(activeThreadId);
+      renderThreadList();
+      break;
     case "event":
-    case "notification": addEvent(msg.data); break;
-    case "thread": addThread(msg.data); break;
+    case "notification":
+      addEvent(msg.data);
+      break;
   }
 }
 
-function applyState(state) {
-  updateConnection(state.connected);
-  // Reset everything for clean replay
+function resetEventStream() {
   seenEventKeys.clear();
   eventCount = 0;
   lastAgentCard = null;
   lastThinkingCard = null;
+  lastTurnStartId = null;
+  lastTurnCompleteId = null;
   const stream = $("#event-stream");
   stream.innerHTML = "";
-  if (state.activeThreadId) $("#detail-thread").textContent = truncId(state.activeThreadId);
-  if (state.events) state.events.forEach((e) => addEvent(e, true));
-  Object.values(state.threads || {}).forEach(addThread);
+  $("#event-count").textContent = "0 events";
+  $("#detail-events").textContent = "0";
+}
+
+function renderThreadList() {
+  const list = $("#thread-list");
+  list.innerHTML = "";
+  if (knownThreads.length === 0) {
+    list.innerHTML = `<div class="empty-state"><div class="emoji">🔌</div><div>No threads yet</div></div>`;
+    return;
+  }
+  for (const t of knownThreads) {
+    const el = document.createElement("div");
+    el.className = "thread-item" + (t.id === activeThreadId ? " active" : "");
+    el.dataset.thread = t.id;
+    el.innerHTML = `<div class="thread-id">${truncId(t.id)}</div><div class="thread-status">${t.id === activeThreadId ? "Active" : "Click to load"}</div>`;
+    el.addEventListener("click", () => switchThread(t.id));
+    list.appendChild(el);
+  }
+}
+
+function switchThread(threadId) {
+  if (threadId === activeThreadId) return;
+  activeThreadId = threadId;
+  resetEventStream();
+  renderThreadList();
+  $("#detail-thread").textContent = truncId(threadId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "switch-thread", threadId }));
+  }
 }
 
 function updateConnection(connected) {
@@ -64,28 +121,16 @@ function updateConnection(connected) {
   }
 }
 
-function addThread(thread) {
-  const list = $("#thread-list");
-  if (list.querySelector(".empty-state")) list.innerHTML = "";
-  if (list.querySelector(`[data-thread="${thread.id}"]`)) return;
-  const el = document.createElement("div");
-  el.className = "thread-item active";
-  el.dataset.thread = thread.id;
-  el.innerHTML = `<div class="thread-id">${truncId(thread.id)}</div><div class="thread-status">Active</div>`;
-  list.appendChild(el);
-}
-
 // ─── Event routing ───
 
 function addEvent(event, bulk = false) {
   const method = event.method || "unknown";
   const params = event.params || {};
 
-  // Deduplicate by method + item/turn id
+  // Deduplicate
   const itemId = params.item?.id || params.itemId;
   const turnId = params.turn?.id || params.turnId;
   const dedupeKey = itemId ? `${method}:${itemId}` : turnId ? `${method}:${turnId}` : null;
-  // For non-streaming events, skip if we've seen this exact event before
   if (dedupeKey && method !== "item/agentMessage/delta" && method !== "item/reasoning/summaryTextDelta") {
     if (seenEventKeys.has(dedupeKey)) return;
     seenEventKeys.add(dedupeKey);
@@ -94,12 +139,13 @@ function addEvent(event, bulk = false) {
   // Hard skip list
   if (method.startsWith("codex/event/")) return;
   if (method === "thread/started") return;
+  if (method === "thread/created") return;
   if (method === "thread/tokenUsage/updated") return;
   if (method === "account/rateLimits/updated") return;
   if (method === "item/created") return;
   if (method === "item/reasoning/summaryPartAdded") return;
 
-  // Streaming handlers (no card created, append to existing)
+  // Streaming handlers
   if (method === "item/agentMessage/delta") {
     appendAgentDelta(params.delta || "", params.itemId);
     return;
@@ -109,7 +155,6 @@ function addEvent(event, bulk = false) {
     return;
   }
 
-  // item/started — only handle specific types, skip everything else
   if (method === "item/started") {
     const type = params.item?.type;
     if (type === "reasoning") {
@@ -119,18 +164,12 @@ function addEvent(event, bulk = false) {
       }, (card) => { lastThinkingCard = card; });
       return;
     }
-    // webSearch and commandExecution — skip started, show completed only
-    if (type === "webSearch" || type === "commandExecution") return;
-    // Skip all other item/started types (userMessage, agentMessage, etc.)
     return;
   }
 
-  // item/completed — handle specific types
   if (method === "item/completed") {
     const item = params.item || {};
-
     if (item.type === "reasoning") {
-      // Finalize thinking card
       const summary = (item.summary || []).join(" ");
       if (lastThinkingCard) {
         const el = lastThinkingCard.querySelector(".thinking-text");
@@ -140,7 +179,6 @@ function addEvent(event, bulk = false) {
       return;
     }
     if (item.type === "agentMessage") {
-      // If we streamed it, finalize; otherwise show full
       if (lastAgentCard) {
         const el = lastAgentCard.querySelector(".streaming-text");
         if (el && item.text) el.textContent = item.text;
@@ -156,11 +194,10 @@ function addEvent(event, bulk = false) {
       }
       return;
     }
-    if (item.type === "userMessage") return; // skip echo
+    if (item.type === "userMessage") return;
     if (item.type === "webSearch") {
       const query = item.query || "";
       const action = item.action;
-      let label = "🔍 Web Search";
       let body = esc(query);
       if (action?.type === "openPage" && action.url) {
         body += `\n<span class="tool-args">→ ${esc(action.url)}</span>`;
@@ -190,11 +227,9 @@ function addEvent(event, bulk = false) {
       });
       return;
     }
-    // Skip other completed types
     return;
   }
 
-  // turn/started
   if (method === "turn/started") {
     const tid = params.turn?.id || params.turnId;
     if (tid && tid === lastTurnStartId) return;
@@ -209,7 +244,6 @@ function addEvent(event, bulk = false) {
     return;
   }
 
-  // turn/completed
   if (method === "turn/completed") {
     const tid = params.turn?.id || params.turnId;
     if (tid && tid === lastTurnCompleteId) return;
@@ -224,7 +258,6 @@ function addEvent(event, bulk = false) {
     return;
   }
 
-  // turn/failed
   if (method === "turn/failed") {
     updateTurnStatus("failed");
     renderCard(event, bulk, {
@@ -234,7 +267,6 @@ function addEvent(event, bulk = false) {
     return;
   }
 
-  // user/prompt (from our own UI)
   if (method === "user/prompt") {
     renderCard(event, bulk, {
       category: "user", cardClass: "user-message", icon: "💬",
@@ -243,7 +275,6 @@ function addEvent(event, bulk = false) {
     return;
   }
 
-  // Everything else — silently ignore (don't show raw JSON)
   console.log("[dashboard] Unhandled:", method);
 }
 
@@ -282,7 +313,6 @@ function renderCard(event, bulk, { category, cardClass, icon, label, body, colla
   if (!bulk) card.scrollIntoView({ behavior: "smooth", block: "end" });
   if (afterInsert) afterInsert(card);
 
-  // Track files
   const filePath = event.params?.item?.file?.path;
   if (filePath) { recentFiles.add(filePath); updateFileList(); }
 }
@@ -386,6 +416,13 @@ $("#prompt-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
 });
 $("#send-btn").addEventListener("click", sendPrompt);
+
+// New thread button
+$("#new-thread-btn").addEventListener("click", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "new-thread" }));
+  }
+});
 
 function sendPrompt() {
   const input = $("#prompt-input");
