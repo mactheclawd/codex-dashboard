@@ -57,6 +57,11 @@ function handleMessage(msg) {
       $("#detail-thread").textContent = truncId(activeThreadId);
       renderThreadList();
       break;
+    case "thread-title": {
+      const t = knownThreads.find((t) => t.id === msg.data.threadId);
+      if (t) { t.title = msg.data.title; renderThreadList(); }
+      break;
+    }
     case "event":
     case "notification":
       addEvent(msg.data);
@@ -88,7 +93,9 @@ function renderThreadList() {
     const el = document.createElement("div");
     el.className = "thread-item" + (t.id === activeThreadId ? " active" : "");
     el.dataset.thread = t.id;
-    el.innerHTML = `<div class="thread-id">${truncId(t.id)}</div><div class="thread-status">${t.id === activeThreadId ? "Active" : "Click to load"}</div>`;
+    const title = t.title || truncId(t.id);
+    const status = t.id === activeThreadId ? "Active" : "Click to load";
+    el.innerHTML = `<div class="thread-id">${esc(title)}</div><div class="thread-status">${status}</div>`;
     el.addEventListener("click", () => switchThread(t.id));
     list.appendChild(el);
   }
@@ -433,6 +440,12 @@ function sendPrompt() {
   input.value = "";
   lastAgentCard = null;
   addEvent({ method: "user/prompt", params: { text }, timestamp: Date.now() });
+  // Set thread title from first prompt
+  const thread = knownThreads.find((t) => t.id === activeThreadId);
+  if (thread && !thread.title) {
+    thread.title = text.length > 50 ? text.slice(0, 50) + "…" : text;
+    renderThreadList();
+  }
 }
 
 // Mobile sidebar toggle

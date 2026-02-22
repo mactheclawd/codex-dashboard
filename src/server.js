@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
-import { readFileSync, existsSync, mkdirSync, readdirSync, appendFileSync, readFileSync as readF } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
@@ -18,6 +18,21 @@ function threadFilePath(threadId) {
   // sanitize threadId for filesystem
   const safe = threadId.replace(/[^a-zA-Z0-9_-]/g, "_");
   return join(THREADS_DIR, `${safe}.jsonl`);
+}
+
+function threadMetaPath(threadId) {
+  const safe = threadId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return join(THREADS_DIR, `${safe}.meta.json`);
+}
+
+function saveThreadMeta(threadId, meta) {
+  writeFileSync(threadMetaPath(threadId), JSON.stringify(meta) + "\n");
+}
+
+function loadThreadMeta(threadId) {
+  const fp = threadMetaPath(threadId);
+  if (!existsSync(fp)) return {};
+  try { return JSON.parse(readFileSync(fp, "utf-8")); } catch { return {}; }
 }
 
 function appendEvent(threadId, event) {
@@ -74,6 +89,7 @@ wss.on("connection", (ws) => {
   const threadList = threadIds.map((id) => ({
     id,
     createdAt: agentState.threads[id].createdAt,
+    title: agentState.threads[id].title || null,
   }));
 
   ws.send(JSON.stringify({
@@ -103,10 +119,17 @@ wss.on("connection", (ws) => {
     try {
       const msg = JSON.parse(data);
       if (msg.type === "prompt" && codexProc && agentState.activeThreadId) {
+        const tid = agentState.activeThreadId;
         sendToCodex("turn/start", {
-          threadId: agentState.activeThreadId,
+          threadId: tid,
           input: [{ type: "text", text: msg.text }],
         });
+        // Set thread title from first prompt
+        if (agentState.threads[tid] && !agentState.threads[tid].title) {
+          agentState.threads[tid].title = msg.text.length > 50 ? msg.text.slice(0, 50) + "…" : msg.text;
+          saveThreadMeta(tid, agentState.threads[tid]);
+          broadcast({ type: "thread-title", data: { threadId: tid, title: agentState.threads[tid].title } });
+        }
       } else if (msg.type === "new-thread") {
         createNewThread();
       } else if (msg.type === "switch-thread") {
@@ -154,7 +177,8 @@ const agentState = {
 
 // Load persisted threads on startup
 for (const id of loadAllThreadIds()) {
-  agentState.threads[id] = { id, createdAt: null };
+  const meta = loadThreadMeta(id);
+  agentState.threads[id] = { id, createdAt: meta.createdAt || null, title: meta.title || null };
 }
 console.log(`[dashboard] Loaded ${Object.keys(agentState.threads).length} persisted threads`);
 
