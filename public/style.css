@@ -420,9 +420,10 @@ body {
 
   /* Header — compact, clear the notch/status bar */
   .header {
-    padding: 0 12px;
+    padding: 0 10px;
     padding-top: env(safe-area-inset-top, 0px);
-    gap: 8px;
+    gap: 6px;
+    overflow: hidden;
   }
 
   .header h1 {
@@ -433,6 +434,7 @@ body {
   .header h1 .owl-emoji { font-size: 18px; }
   .header h1 .title-text { display: inline; }
   .header .model-badge { font-size: 10px; padding: 2px 8px; }
+  #event-count { display: none; }
 
   /* Sidebar as slide-over overlay on mobile */
   .sidebar {
