@@ -450,4 +450,30 @@ function toggleSidebar(open) {
 menuBtn.addEventListener("click", () => toggleSidebar());
 backdrop.addEventListener("click", () => toggleSidebar(false));
 
+// Swipe gestures for mobile sidebar
+let touchStartX = 0;
+let touchStartY = 0;
+let touchStartTime = 0;
+
+document.addEventListener("touchstart", (e) => {
+  touchStartX = e.touches[0].clientX;
+  touchStartY = e.touches[0].clientY;
+  touchStartTime = Date.now();
+}, { passive: true });
+
+document.addEventListener("touchend", (e) => {
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  const dy = e.changedTouches[0].clientY - touchStartY;
+  const dt = Date.now() - touchStartTime;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+
+  // Must be horizontal, fast-ish, and significant distance
+  if (absDx < 50 || absDy > absDx || dt > 400) return;
+
+  const isOpen = sidebar.classList.contains("open");
+  if (dx > 0 && !isOpen && touchStartX < 40) toggleSidebar(true);   // swipe right from left edge
+  if (dx < 0 && isOpen) toggleSidebar(false);                        // swipe left to close
+}, { passive: true });
+
 connect();
