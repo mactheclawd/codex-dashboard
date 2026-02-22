@@ -5,7 +5,7 @@ const startTime = Date.now();
 let eventCount = 0;
 let ws = null;
 const recentFiles = new Set();
-const seenItemIds = new Set(); // deduplicate by item id
+const seenEventKeys = new Set(); // deduplicate events
 
 // Streaming state
 let lastAgentCard = null;
@@ -36,6 +36,8 @@ function handleMessage(msg) {
 
 function applyState(state) {
   updateConnection(state.connected);
+  seenEventKeys.clear(); // reset dedup on reconnect
+  eventCount = 0;
   if (state.activeThreadId) $("#detail-thread").textContent = truncId(state.activeThreadId);
   if (state.events) state.events.forEach((e) => addEvent(e, true));
   Object.values(state.threads || {}).forEach(addThread);
@@ -73,6 +75,16 @@ function addThread(thread) {
 function addEvent(event, bulk = false) {
   const method = event.method || "unknown";
   const params = event.params || {};
+
+  // Deduplicate by method + item/turn id
+  const itemId = params.item?.id || params.itemId;
+  const turnId = params.turn?.id || params.turnId;
+  const dedupeKey = itemId ? `${method}:${itemId}` : turnId ? `${method}:${turnId}` : null;
+  // For non-streaming events, skip if we've seen this exact event before
+  if (dedupeKey && method !== "item/agentMessage/delta" && method !== "item/reasoning/summaryTextDelta") {
+    if (seenEventKeys.has(dedupeKey)) return;
+    seenEventKeys.add(dedupeKey);
+  }
 
   // Hard skip list
   if (method.startsWith("codex/event/")) return;
