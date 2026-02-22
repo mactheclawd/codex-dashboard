@@ -121,7 +121,11 @@ wss.on("connection", (ws) => {
       if (msg.type === "prompt" && codexProc) {
         const tid = msg.threadId || agentState.activeThreadId;
         if (!tid) return;
-        // Persist user prompt to the thread's JSONL
+        // Persist thread on first prompt
+        if (agentState.threads[tid] && !agentState.threads[tid].persisted) {
+          agentState.threads[tid].persisted = true;
+          saveThreadMeta(tid, agentState.threads[tid]);
+        }
         appendEvent(tid, { method: "user/prompt", params: { text: msg.text, threadId: tid }, timestamp: Date.now() });
         sendToCodex("turn/start", {
           threadId: tid,
@@ -178,8 +182,11 @@ const agentState = {
 
 // Load persisted threads on startup
 for (const id of loadAllThreadIds()) {
+  // Skip empty JSONL files (threads that never got a prompt)
+  const events = loadEvents(id);
+  if (events.length === 0) continue;
   const meta = loadThreadMeta(id);
-  agentState.threads[id] = { id, createdAt: meta.createdAt || null, title: meta.title || null };
+  agentState.threads[id] = { id, createdAt: meta.createdAt || null, title: meta.title || null, persisted: true };
 }
 console.log(`[dashboard] Loaded ${Object.keys(agentState.threads).length} persisted threads`);
 
@@ -232,11 +239,9 @@ async function createNewThread() {
     });
     if (threadResult?.thread?.id) {
       const id = threadResult.thread.id;
-      const threadInfo = { id, createdAt: Date.now() };
+      const threadInfo = { id, createdAt: Date.now(), persisted: false };
       agentState.threads[id] = threadInfo;
       agentState.activeThreadId = id;
-      // Touch the JSONL file so it persists
-      appendEvent(id, { method: "thread/created", params: { threadId: id }, timestamp: Date.now() });
       console.log(`[codex] New thread: ${id}`);
       broadcast({ type: "new-thread", data: threadInfo });
       broadcast({ type: "active-thread", data: { threadId: id } });
