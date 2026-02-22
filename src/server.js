@@ -194,7 +194,7 @@ function pushEvent(event) {
   const timestamped = { ...event, timestamp: Date.now() };
   // Persist to the correct thread using threadId from event params
   const threadId = event.params?.threadId || event.params?.turn?.threadId || agentState.activeThreadId;
-  if (threadId) {
+  if (threadId && agentState.threads[threadId]?.persisted) {
     appendEvent(threadId, timestamped);
   }
   // Include threadId in broadcast so client can route correctly
