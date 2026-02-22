@@ -5,55 +5,39 @@ const startTime = Date.now();
 let eventCount = 0;
 let ws = null;
 const recentFiles = new Set();
+const seenItemIds = new Set(); // deduplicate by item id
+
+// Streaming state
+let lastAgentCard = null;
+let lastThinkingCard = null;
 let lastTurnStartId = null;
 let lastTurnCompleteId = null;
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}`);
-
-  ws.onopen = () => console.log("[dashboard] Connected to server");
-
-  ws.onclose = () => {
-    console.log("[dashboard] Disconnected, reconnecting...");
-    setTimeout(connect, 2000);
-  };
-
+  ws.onopen = () => console.log("[dashboard] Connected");
+  ws.onclose = () => { setTimeout(connect, 2000); };
   ws.onmessage = (e) => {
-    try {
-      handleMessage(JSON.parse(e.data));
-    } catch (err) {
-      console.error("[dashboard] Parse error:", err);
-    }
+    try { handleMessage(JSON.parse(e.data)); }
+    catch (err) { console.error("[dashboard] Parse error:", err); }
   };
 }
 
 function handleMessage(msg) {
   switch (msg.type) {
-    case "state":
-      applyState(msg.data);
-      break;
-    case "status":
-      updateConnection(msg.data.connected);
-      break;
+    case "state": applyState(msg.data); break;
+    case "status": updateConnection(msg.data.connected); break;
     case "event":
-    case "notification":
-      addEvent(msg.data);
-      break;
-    case "thread":
-      addThread(msg.data);
-      break;
+    case "notification": addEvent(msg.data); break;
+    case "thread": addThread(msg.data); break;
   }
 }
 
 function applyState(state) {
   updateConnection(state.connected);
-  if (state.activeThreadId) {
-    $("#detail-thread").textContent = truncId(state.activeThreadId);
-  }
-  if (state.events) {
-    state.events.forEach((e) => addEvent(e, true));
-  }
+  if (state.activeThreadId) $("#detail-thread").textContent = truncId(state.activeThreadId);
+  if (state.events) state.events.forEach((e) => addEvent(e, true));
   Object.values(state.threads || {}).forEach(addThread);
 }
 
@@ -62,19 +46,14 @@ function updateConnection(connected) {
   const detail = $("#detail-connection");
   const input = $("#prompt-input");
   const btn = $("#send-btn");
-
   if (connected) {
     dot.classList.add("connected");
-    detail.textContent = "Connected";
-    detail.style.color = "var(--green)";
-    input.disabled = false;
-    btn.disabled = false;
+    detail.textContent = "Connected"; detail.style.color = "var(--green)";
+    input.disabled = false; btn.disabled = false;
   } else {
     dot.classList.remove("connected");
-    detail.textContent = "Disconnected";
-    detail.style.color = "var(--red)";
-    input.disabled = true;
-    btn.disabled = true;
+    detail.textContent = "Disconnected"; detail.style.color = "var(--red)";
+    input.disabled = true; btn.disabled = true;
   }
 }
 
@@ -82,24 +61,193 @@ function addThread(thread) {
   const list = $("#thread-list");
   if (list.querySelector(".empty-state")) list.innerHTML = "";
   if (list.querySelector(`[data-thread="${thread.id}"]`)) return;
-
   const el = document.createElement("div");
   el.className = "thread-item active";
   el.dataset.thread = thread.id;
-  el.innerHTML = `
-    <div class="thread-id">${truncId(thread.id)}</div>
-    <div class="thread-status">Active</div>
-  `;
+  el.innerHTML = `<div class="thread-id">${truncId(thread.id)}</div><div class="thread-status">Active</div>`;
   list.appendChild(el);
 }
+
+// ─── Event routing ───
 
 function addEvent(event, bulk = false) {
   const method = event.method || "unknown";
   const params = event.params || {};
 
-  // Skip noisy internal events
-  if (shouldSkipEvent(method, params)) return;
+  // Hard skip list
+  if (method.startsWith("codex/event/")) return;
+  if (method === "thread/started") return;
+  if (method === "thread/tokenUsage/updated") return;
+  if (method === "account/rateLimits/updated") return;
+  if (method === "item/created") return;
+  if (method === "item/reasoning/summaryPartAdded") return;
 
+  // Streaming handlers (no card created, append to existing)
+  if (method === "item/agentMessage/delta") {
+    appendAgentDelta(params.delta || "", params.itemId);
+    return;
+  }
+  if (method === "item/reasoning/summaryTextDelta") {
+    appendThinkingDelta(params.delta || "");
+    return;
+  }
+
+  // item/started — only handle specific types, skip everything else
+  if (method === "item/started") {
+    const type = params.item?.type;
+    if (type === "reasoning") {
+      renderCard(event, bulk, {
+        category: "stream", cardClass: "thinking-card collapsible", icon: "💭",
+        label: "Thinking", body: `<span class="thinking-text"></span>`, collapsible: true,
+      }, (card) => { lastThinkingCard = card; });
+      return;
+    }
+    if (type === "webSearch") {
+      const query = params.item.query || "";
+      renderCard(event, bulk, {
+        category: "stream", cardClass: "tool-call-card collapsible", icon: "🔍",
+        label: "Web Search",
+        body: query ? `<span class="tool-name">${esc(query)}</span>` : `<span class="tool-args">Searching…</span>`,
+        collapsible: true,
+      });
+      return;
+    }
+    if (type === "commandExecution") {
+      const cmd = params.item.call?.command || params.item.command || "";
+      const cmdStr = typeof cmd === "string" ? cmd : JSON.stringify(cmd);
+      renderCard(event, bulk, {
+        category: "stream", cardClass: "tool-call-card collapsible", icon: "⚡",
+        label: "Command",
+        body: cmdStr ? `<span class="cmd">$ ${esc(cmdStr)}</span>` : `<span class="tool-args">Executing…</span>`,
+        collapsible: true,
+      });
+      return;
+    }
+    // Skip all other item/started types (userMessage, agentMessage, etc.)
+    return;
+  }
+
+  // item/completed — handle specific types
+  if (method === "item/completed") {
+    const item = params.item || {};
+
+    if (item.type === "reasoning") {
+      // Finalize thinking card
+      const summary = (item.summary || []).join(" ");
+      if (lastThinkingCard) {
+        const el = lastThinkingCard.querySelector(".thinking-text");
+        if (el && summary) el.textContent = summary;
+        lastThinkingCard = null;
+      }
+      return;
+    }
+    if (item.type === "agentMessage") {
+      // If we streamed it, finalize; otherwise show full
+      if (lastAgentCard) {
+        const el = lastAgentCard.querySelector(".streaming-text");
+        if (el && item.text) el.textContent = item.text;
+        lastAgentCard = null;
+        return;
+      }
+      if (item.id && document.querySelector(`[data-item-id="${item.id}"]`)) return;
+      if (item.text) {
+        renderCard(event, bulk, {
+          category: "agent", cardClass: "agent-message", icon: "🤖",
+          label: "Codex", body: `<span class="msg-text">${esc(item.text)}</span>`,
+        });
+      }
+      return;
+    }
+    if (item.type === "userMessage") return; // skip echo
+    if (item.type === "webSearch") {
+      const query = item.query || "";
+      const action = item.action;
+      let body = esc(query);
+      if (action?.type === "openPage" && action.url) {
+        body += `\n<span class="tool-args">→ ${esc(action.url)}</span>`;
+      }
+      renderCard(event, bulk, {
+        category: "stream", cardClass: "tool-call-card collapsible", icon: "🔍",
+        label: "Search done", body, collapsible: true,
+      });
+      return;
+    }
+    if (item.type === "commandExecution") {
+      const exitCode = item.exitCode ?? item.command?.exitCode;
+      const output = item.output || "";
+      const ok = exitCode === 0;
+      let body = ok ? "✓" : `✗ (exit ${exitCode})`;
+      if (output) {
+        const trimmed = output.length > 300 ? output.slice(0, 300) + "…" : output;
+        body += `\n<span class="tool-args">${esc(trimmed)}</span>`;
+      }
+      renderCard(event, bulk, {
+        category: ok ? "turn" : "error",
+        cardClass: ok ? "tool-call-card collapsible" : "tool-call-card collapsible",
+        icon: ok ? "✅" : "❌", label: "Command done", body, collapsible: !!output,
+      });
+      return;
+    }
+    // Skip other completed types
+    return;
+  }
+
+  // turn/started
+  if (method === "turn/started") {
+    const tid = params.turn?.id || params.turnId;
+    if (tid && tid === lastTurnStartId) return;
+    lastTurnStartId = tid;
+    lastAgentCard = null;
+    lastThinkingCard = null;
+    updateTurnStatus("active");
+    renderCard(event, bulk, {
+      category: "turn", cardClass: "", icon: "▶️",
+      label: "Turn started", body: "Codex is thinking…",
+    });
+    return;
+  }
+
+  // turn/completed
+  if (method === "turn/completed") {
+    const tid = params.turn?.id || params.turnId;
+    if (tid && tid === lastTurnCompleteId) return;
+    lastTurnCompleteId = tid;
+    lastAgentCard = null;
+    lastThinkingCard = null;
+    updateTurnStatus("completed");
+    renderCard(event, bulk, {
+      category: "turn", cardClass: "", icon: "✅",
+      label: "Turn completed", body: formatTurnSummary(params),
+    });
+    return;
+  }
+
+  // turn/failed
+  if (method === "turn/failed") {
+    updateTurnStatus("failed");
+    renderCard(event, bulk, {
+      category: "error", cardClass: "", icon: "❌",
+      label: "Turn failed", body: esc(params.error?.message || params.reason || "Unknown error"),
+    });
+    return;
+  }
+
+  // user/prompt (from our own UI)
+  if (method === "user/prompt") {
+    renderCard(event, bulk, {
+      category: "user", cardClass: "user-message", icon: "💬",
+      label: "You", body: `<span class="msg-text">${esc(params.text || "")}</span>`,
+    });
+    return;
+  }
+
+  // Everything else — silently ignore (don't show raw JSON)
+  console.log("[dashboard] Unhandled:", method);
+}
+
+// ─── Card rendering ───
+
+function renderCard(event, bulk, { category, cardClass, icon, label, body, collapsible }, afterInsert) {
   eventCount++;
   $("#event-count").textContent = `${eventCount} events`;
   $("#detail-events").textContent = eventCount;
@@ -111,367 +259,35 @@ function addEvent(event, bulk = false) {
     ? new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-  // Track files
-  const filePath = params.item?.file?.path;
-  if (filePath) {
-    recentFiles.add(filePath);
-    updateFileList();
-  }
-
-  // Update turn status
-  if (method === "turn/started") {
-    $("#detail-turn").innerHTML = `<span class="spinner"></span> Active`;
-  } else if (method === "turn/completed") {
-    $("#detail-turn").textContent = "Completed ✓";
-    $("#detail-turn").style.color = "var(--green)";
-  } else if (method === "turn/failed") {
-    $("#detail-turn").textContent = "Failed ✗";
-    $("#detail-turn").style.color = "var(--red)";
-  }
-
-  const result = formatEvent(method, params);
-  if (!result) return;
-  const { category, cardClass, icon, label, body, collapsible } = result;
-
+  const toggle = collapsible ? '<span class="collapse-toggle">▶</span>' : "";
   const card = document.createElement("div");
   card.className = `event-card ${cardClass}`;
-
-  const toggleHtml = collapsible ? '<span class="collapse-toggle">▶</span>' : '';
-
   card.innerHTML = `
     <div class="event-header">
-      <span class="event-type ${category}">${toggleHtml}${icon} ${label}</span>
+      <span class="event-type ${category}">${toggle}${icon} ${label}</span>
       <span class="event-time">${time}</span>
     </div>
     <div class="event-body">${body}</div>
   `;
 
   if (collapsible) {
-    card.querySelector('.event-header').addEventListener('click', () => {
-      card.classList.toggle('expanded');
+    card.querySelector(".event-header").addEventListener("click", () => {
+      card.classList.toggle("expanded");
     });
   }
 
   stream.appendChild(card);
   if (!bulk) card.scrollIntoView({ behavior: "smooth", block: "end" });
+  if (afterInsert) afterInsert(card);
+
+  // Track files
+  const filePath = event.params?.item?.file?.path;
+  if (filePath) { recentFiles.add(filePath); updateFileList(); }
 }
 
-function shouldSkipEvent(method, params) {
-  // Skip duplicates
-  if (method.startsWith("codex/event/")) return true;
-  if (method === "thread/started") return true;
-  if (method === "thread/tokenUsage/updated") return true;
-  if (method === "account/rateLimits/updated") return true;
-  // Skip user message echo
-  if (method === "item/completed" && params.item?.type === "userMessage") return true;
-  // Skip item/created — we use item/started and item/completed instead
-  if (method === "item/created") return true;
-  // Skip agentMessage started — deltas handle streaming
-  if (method === "item/started" && params.item?.type === "agentMessage") return true;
-  // Skip reasoning part-added (we stream via summaryTextDelta)
-  if (method === "item/reasoning/summaryPartAdded") return true;
-  return false;
-}
+// ─── Streaming helpers ───
 
-function formatEvent(method, params) {
-  // User prompt
-  if (method === "user/prompt") {
-    return {
-      category: "user",
-      cardClass: "user-message",
-      icon: "💬",
-      label: "You",
-      body: `<span class="msg-text">${escHtml(params.text || "")}</span>`,
-    };
-  }
-
-  // Turn started — deduplicate
-  if (method === "turn/started") {
-    const tid = params.turn?.id || params.turnId;
-    if (tid && tid === lastTurnStartId) return null;
-    lastTurnStartId = tid;
-    lastAgentCard = null; // reset streaming
-    return {
-      category: "turn",
-      cardClass: "",
-      icon: "▶️",
-      label: "Turn started",
-      body: `Codex is thinking...`,
-    };
-  }
-
-  // Turn completed — deduplicate
-  if (method === "turn/completed") {
-    const tid = params.turn?.id || params.turnId;
-    if (tid && tid === lastTurnCompleteId) return null;
-    lastTurnCompleteId = tid;
-    lastAgentCard = null; // reset streaming
-    return {
-      category: "turn",
-      cardClass: "",
-      icon: "✅",
-      label: "Turn completed",
-      body: formatTurnSummary(params),
-    };
-  }
-
-  // Turn failed
-  if (method === "turn/failed") {
-    return {
-      category: "error",
-      cardClass: "",
-      icon: "❌",
-      label: "Turn failed",
-      body: escHtml(params.error?.message || params.reason || "Unknown error"),
-    };
-  }
-
-  // Agent message
-  if (method === "item/created" && params.item?.type === "agentMessage") {
-    const content = extractContent(params.item);
-    return {
-      category: "agent",
-      cardClass: "agent-message",
-      icon: "🤖",
-      label: "Codex",
-      body: `<span class="msg-text">${escHtml(content)}</span>`,
-    };
-  }
-
-  // File change
-  if (method === "item/created" && params.item?.file) {
-    const path = params.item.file.path || "unknown";
-    const action = params.item.file.status || "modified";
-    return {
-      category: "item",
-      cardClass: "file-change",
-      icon: "📄",
-      label: `File ${action}`,
-      body: `<span class="file-path">${escHtml(path)}</span>`,
-    };
-  }
-
-  // Command execution
-  if (method === "item/created" && params.item?.type === "command") {
-    const cmd = params.item.command?.command || params.item.command || "";
-    return {
-      category: "stream",
-      cardClass: "command-run",
-      icon: "⚡",
-      label: "Command",
-      body: `<span class="cmd">$ ${escHtml(typeof cmd === "string" ? cmd : JSON.stringify(cmd))}</span>`,
-    };
-  }
-
-  // Streaming delta — agent typing
-  if (method === "item/agentMessage/delta") {
-    const delta = params.delta || "";
-    appendDelta(delta, params.itemId);
-    return null;
-  }
-
-  // Item completed
-  if (method === "item/completed") {
-    const item = params.item || {};
-    if (item.type === "command") {
-      const exitCode = item.command?.exitCode ?? item.exitCode;
-      const status = exitCode === 0 ? "✓" : `✗ (exit ${exitCode})`;
-      return {
-        category: exitCode === 0 ? "turn" : "error",
-        cardClass: "",
-        icon: exitCode === 0 ? "✅" : "❌",
-        label: "Command done",
-        body: `${status}`,
-      };
-    }
-    // Agent message completed — check if we already streamed it
-    if (item.type === "agentMessage") {
-      if (lastAgentCard) {
-        // Already streamed — just finalize
-        const textEl = lastAgentCard.querySelector(".streaming-text");
-        if (textEl && item.text) textEl.textContent = item.text;
-        lastAgentCard = null;
-        return null;
-      }
-      // Check if we already have a streaming card for this item id
-      const existingCard = document.querySelector(`[data-item-id="${item.id}"]`);
-      if (existingCard) return null;
-      // No streaming card — show full message
-      if (item.text) {
-        return {
-          category: "agent",
-          cardClass: "agent-message",
-          icon: "🤖",
-          label: "Codex",
-          body: `<span class="msg-text">${escHtml(item.text)}</span>`,
-        };
-      }
-      return null;
-    }
-    return null;
-  }
-
-  // Approval request
-  if (method === "codex/event/approval_request") {
-    const cmd = params.command?.command || params.command || "unknown";
-    return {
-      category: "stream",
-      cardClass: "",
-      icon: "🔐",
-      label: "Approval needed",
-      body: `<span class="cmd">$ ${escHtml(typeof cmd === "string" ? cmd : JSON.stringify(cmd))}</span>`,
-    };
-  }
-
-  // Reasoning streaming delta — append to thinking card
-  if (method === "item/reasoning/summaryTextDelta") {
-    const delta = params.delta || "";
-    appendThinking(delta, params.itemId);
-    return null;
-  }
-
-  // Reasoning item started — create collapsible thinking card
-  if (method === "item/started" && params.item?.type === "reasoning") {
-    lastThinkingCard = null; // reset for new reasoning block
-    return {
-      category: "stream",
-      cardClass: "thinking-card collapsible",
-      icon: "💭",
-      label: "Thinking",
-      body: `<span class="thinking-text"></span>`,
-      collapsible: true,
-    };
-  }
-
-  // Reasoning item completed — finalize thinking card
-  if (method === "item/completed" && params.item?.type === "reasoning") {
-    const summary = (params.item.summary || []).join(" ");
-    if (lastThinkingCard) {
-      const textEl = lastThinkingCard.querySelector(".thinking-text");
-      if (textEl && summary) textEl.textContent = summary;
-      lastThinkingCard = null;
-    }
-    return null;
-  }
-
-  // Web search started
-  if (method === "item/started" && params.item?.type === "webSearch") {
-    const query = params.item.query || "";
-    return {
-      category: "stream",
-      cardClass: "tool-call-card collapsible",
-      icon: "🔍",
-      label: "Web Search",
-      body: query ? `<span class="tool-name">${escHtml(query)}</span>` : `<span class="tool-args">Searching...</span>`,
-      collapsible: true,
-    };
-  }
-
-  // Web search completed
-  if (method === "item/completed" && params.item?.type === "webSearch") {
-    const query = params.item.query || "";
-    const action = params.item.action;
-    let body = escHtml(query);
-    if (action?.type === "openPage" && action.url) {
-      body += `\n<span class="tool-args">→ ${escHtml(action.url)}</span>`;
-    }
-    return {
-      category: "stream",
-      cardClass: "tool-call-card collapsible",
-      icon: "🔍",
-      label: "Search done",
-      body,
-      collapsible: true,
-    };
-  }
-
-  // Tool calls
-  if (method === "item/created" && params.item?.type === "toolCall") {
-    const name = params.item.toolCall?.name || params.item.name || "unknown";
-    const args = params.item.toolCall?.arguments || params.item.arguments || {};
-    const argsStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
-    return {
-      category: "stream",
-      cardClass: "tool-call-card collapsible",
-      icon: "🔧",
-      label: `Tool: ${name}`,
-      body: `<span class="tool-name">${escHtml(name)}</span>\n<span class="tool-args">${escHtml(argsStr.length > 500 ? argsStr.slice(0, 500) + "…" : argsStr)}</span>`,
-      collapsible: true,
-    };
-  }
-
-  // Tool call completed
-  if (method === "item/completed" && params.item?.type === "toolCall") {
-    const name = params.item.toolCall?.name || params.item.name || "tool";
-    const output = params.item.toolCall?.output || params.item.output || "";
-    const outputStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
-    return {
-      category: "stream",
-      cardClass: "tool-call-card collapsible",
-      icon: "🔧",
-      label: `Tool done: ${name}`,
-      body: `<span class="tool-args">${escHtml(outputStr.length > 500 ? outputStr.slice(0, 500) + "…" : outputStr)}</span>`,
-      collapsible: true,
-    };
-  }
-
-  // Function calls (alternative format)
-  if (method === "item/created" && params.item?.type === "functionCall") {
-    const name = params.item.name || params.item.functionCall?.name || "unknown";
-    const args = params.item.arguments || params.item.functionCall?.arguments || {};
-    const argsStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
-    return {
-      category: "stream",
-      cardClass: "tool-call-card collapsible",
-      icon: "🔧",
-      label: `Call: ${name}`,
-      body: `<span class="tool-name">${escHtml(name)}</span>\n<span class="tool-args">${escHtml(argsStr.length > 500 ? argsStr.slice(0, 500) + "…" : argsStr)}</span>`,
-      collapsible: true,
-    };
-  }
-
-  if (method === "item/completed" && params.item?.type === "functionCall") {
-    const name = params.item.name || "function";
-    const output = params.item.output || "";
-    const outputStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
-    return {
-      category: "stream",
-      cardClass: "tool-call-card collapsible",
-      icon: "🔧",
-      label: `Done: ${name}`,
-      body: `<span class="tool-args">${escHtml(outputStr.length > 500 ? outputStr.slice(0, 500) + "…" : outputStr)}</span>`,
-      collapsible: true,
-    };
-  }
-
-  // Generic fallback — keep it clean
-  return {
-    category: "item",
-    cardClass: "",
-    icon: "📡",
-    label: shortMethod(method),
-    body: formatCompact(params),
-  };
-}
-
-// Append streaming delta to the last agent message
-let lastAgentCard = null;
-let lastThinkingCard = null;
-
-function appendThinking(delta, itemId) {
-  const stream = $("#event-stream");
-  if (!lastThinkingCard || !stream.contains(lastThinkingCard)) {
-    // Find the most recent thinking card
-    const cards = stream.querySelectorAll(".thinking-card");
-    lastThinkingCard = cards.length ? cards[cards.length - 1] : null;
-  }
-  if (lastThinkingCard) {
-    const textEl = lastThinkingCard.querySelector(".thinking-text");
-    if (textEl) textEl.textContent += delta;
-  }
-}
-
-function appendDelta(delta, itemId) {
+function appendAgentDelta(delta, itemId) {
   const stream = $("#event-stream");
   if (!lastAgentCard || !stream.contains(lastAgentCard)) {
     if (stream.querySelector(".empty-state")) stream.innerHTML = "";
@@ -486,30 +302,45 @@ function appendDelta(delta, itemId) {
       <div class="event-body"><span class="msg-text streaming-text"></span></div>
     `;
     stream.appendChild(lastAgentCard);
+    eventCount++;
+    $("#event-count").textContent = `${eventCount} events`;
+    $("#detail-events").textContent = eventCount;
   }
-  const textEl = lastAgentCard.querySelector(".streaming-text");
-  if (textEl) {
-    textEl.textContent += (typeof delta === "string" ? delta : JSON.stringify(delta));
-  }
+  const el = lastAgentCard.querySelector(".streaming-text");
+  if (el) el.textContent += (typeof delta === "string" ? delta : JSON.stringify(delta));
   lastAgentCard.scrollIntoView({ behavior: "smooth", block: "end" });
 }
 
-// When a non-delta event arrives, clear the streaming target
-const origAddEvent = addEvent;
+function appendThinkingDelta(delta) {
+  const stream = $("#event-stream");
+  if (!lastThinkingCard || !stream.contains(lastThinkingCard)) {
+    const cards = stream.querySelectorAll(".thinking-card");
+    lastThinkingCard = cards.length ? cards[cards.length - 1] : null;
+  }
+  if (lastThinkingCard) {
+    const el = lastThinkingCard.querySelector(".thinking-text");
+    if (el) el.textContent += delta;
+  }
+}
 
-function extractContent(item) {
-  if (!item) return "";
-  const c = item.message?.content || item.content;
-  if (typeof c === "string") return c;
-  if (Array.isArray(c)) return c.map((x) => x.text || "").join("");
-  return JSON.stringify(c || {});
+// ─── Status helpers ───
+
+function updateTurnStatus(state) {
+  const el = $("#detail-turn");
+  if (state === "active") {
+    el.innerHTML = `<span class="spinner"></span> Active`;
+    el.style.color = "";
+  } else if (state === "completed") {
+    el.textContent = "Completed ✓"; el.style.color = "var(--green)";
+  } else if (state === "failed") {
+    el.textContent = "Failed ✗"; el.style.color = "var(--red)";
+  }
 }
 
 function formatTurnSummary(params) {
-  const turn = params.turn || {};
-  const items = turn.items || [];
+  const items = (params.turn?.items || []);
   const files = items.filter((i) => i.file).length;
-  const cmds = items.filter((i) => i.type === "command").length;
+  const cmds = items.filter((i) => i.type === "command" || i.type === "commandExecution").length;
   const msgs = items.filter((i) => i.type === "agentMessage").length;
   const parts = [];
   if (msgs) parts.push(`${msgs} message${msgs > 1 ? "s" : ""}`);
@@ -518,47 +349,21 @@ function formatTurnSummary(params) {
   return parts.length ? parts.join(" · ") : "Done";
 }
 
-function shortMethod(method) {
-  // Shorten long method names
-  return method
-    .replace("codex/event/", "")
-    .replace("item/", "")
-    .replace(/([A-Z])/g, " $1")
-    .trim();
-}
-
-function formatCompact(params) {
-  // Show a one-line summary instead of full JSON
-  const keys = Object.keys(params);
-  if (keys.length === 0) return "—";
-  if (keys.length <= 3) {
-    return keys
-      .map((k) => {
-        const v = params[k];
-        const s = typeof v === "string" ? v : JSON.stringify(v);
-        return `${k}: ${escHtml(s.length > 60 ? s.slice(0, 60) + "…" : s)}`;
-      })
-      .join("\n");
-  }
-  const raw = JSON.stringify(params, null, 2);
-  return escHtml(raw.length > 300 ? raw.slice(0, 300) + "…" : raw);
-}
-
 function updateFileList() {
   const el = $("#file-list");
   if (!el) return;
-  el.innerHTML = [...recentFiles]
-    .slice(-10)
-    .map((f) => `<div style="padding: 2px 0; color: var(--accent);">📄 ${escHtml(f)}</div>`)
-    .join("");
+  el.innerHTML = [...recentFiles].slice(-10)
+    .map((f) => `<div style="padding:2px 0;color:var(--accent);">📄 ${esc(f)}</div>`).join("");
 }
+
+// ─── Utilities ───
 
 function truncId(id) {
   if (!id || id.length < 12) return id || "—";
   return id.slice(0, 8) + "…" + id.slice(-4);
 }
 
-function escHtml(s) {
+function esc(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
@@ -576,30 +381,18 @@ setInterval(() => {
 
 // Prompt input
 $("#prompt-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    sendPrompt();
-  }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); }
 });
-
 $("#send-btn").addEventListener("click", sendPrompt);
 
 function sendPrompt() {
   const input = $("#prompt-input");
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-
   ws.send(JSON.stringify({ type: "prompt", text }));
   input.value = "";
-
-  // Reset streaming target
   lastAgentCard = null;
-
-  addEvent({
-    method: "user/prompt",
-    params: { text },
-    timestamp: Date.now(),
-  });
+  addEvent({ method: "user/prompt", params: { text }, timestamp: Date.now() });
 }
 
 connect();
