@@ -72,7 +72,7 @@ function resetEventStream() {
   lastTurnStartId = null;
   lastTurnCompleteId = null;
   const stream = $("#event-stream");
-  stream.innerHTML = "";
+  stream.innerHTML = `<div class="empty-state"><div class="emoji">👀</div><div>No events yet</div><div style="font-size:12px;">Send a prompt to get started</div></div>`;
   $("#event-count").textContent = "0 events";
   $("#detail-events").textContent = "0";
 }
