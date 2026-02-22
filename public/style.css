@@ -300,6 +300,36 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* Mobile */
+@media (max-width: 768px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: 48px auto 1fr auto 48px;
+  }
+
+  .sidebar {
+    max-height: 120px;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar h2 { display: inline; margin-right: 8px; }
+
+  .thread-item {
+    display: inline-block;
+    margin-right: 8px;
+    margin-bottom: 0;
+  }
+
+  .details {
+    display: none;
+  }
+
+  .main {
+    min-height: 0;
+  }
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
