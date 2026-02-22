@@ -77,6 +77,26 @@ body {
   box-shadow: 0 0 8px var(--green);
 }
 
+/* Menu button — hidden on desktop, shown on mobile */
+.menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 18px;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+}
+.menu-btn:hover { background: var(--bg-hover); }
+
+.sidebar-backdrop { display: none; }
+
 .header .spacer { flex: 1; }
 
 .header .model-badge {
@@ -414,8 +434,26 @@ body {
   .header h1 .title-text { display: inline; }
   .header .model-badge { font-size: 10px; padding: 2px 8px; }
 
-  /* Hide sidebar and details on mobile */
-  .sidebar { display: none; }
+  /* Sidebar as slide-over overlay on mobile */
+  .sidebar {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 280px;
+    z-index: 100;
+    border-right: 1px solid var(--border);
+    box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+  }
+  .sidebar.open { display: block; }
+  .sidebar-backdrop {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 99;
+  }
+  .sidebar-backdrop.open { display: block; }
+  .menu-btn { display: flex; }
   .details { display: none; }
 
   /* Main — full screen */

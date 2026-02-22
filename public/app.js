@@ -100,6 +100,7 @@ function switchThread(threadId) {
   resetEventStream();
   renderThreadList();
   $("#detail-thread").textContent = truncId(threadId);
+  toggleSidebar(false); // close sidebar on mobile
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "switch-thread", threadId }));
   }
@@ -433,5 +434,20 @@ function sendPrompt() {
   lastAgentCard = null;
   addEvent({ method: "user/prompt", params: { text }, timestamp: Date.now() });
 }
+
+// Mobile sidebar toggle
+const menuBtn = $("#menu-btn");
+const sidebar = $(".sidebar");
+const backdrop = $("#sidebar-backdrop");
+
+function toggleSidebar(open) {
+  const isOpen = sidebar.classList.contains("open");
+  const shouldOpen = open !== undefined ? open : !isOpen;
+  sidebar.classList.toggle("open", shouldOpen);
+  backdrop.classList.toggle("open", shouldOpen);
+}
+
+menuBtn.addEventListener("click", () => toggleSidebar());
+backdrop.addEventListener("click", () => toggleSidebar(false));
 
 connect();
