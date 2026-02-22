@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codex Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <h1>
+        <span>🦉</span>
+        <span>Codex Dashboard</span>
+        <span id="status-dot" class="status-dot"></span>
+      </h1>
+      <div class="spacer"></div>
+      <span class="model-badge" id="model-badge">gpt-5.1-codex</span>
+      <span class="model-badge" id="event-count">0 events</span>
+    </header>
+
+    <!-- Sidebar: Threads -->
+    <aside class="sidebar">
+      <h2>Threads</h2>
+      <div id="thread-list">
+        <div class="empty-state">
+          <div class="emoji">🔌</div>
+          <div>Waiting for connection...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main: Event Stream -->
+    <main class="main" id="event-stream">
+      <div class="empty-state">
+        <div class="emoji">👀</div>
+        <div>No events yet</div>
+        <div style="font-size: 12px;">Connect to Codex app-server to start streaming</div>
+      </div>
+    </main>
+
+    <!-- Details Panel -->
+    <aside class="details">
+      <h2>Details</h2>
+      <div class="detail-item">
+        <label>Connection</label>
+        <div class="value" id="detail-connection">Disconnected</div>
+      </div>
+      <div class="detail-item">
+        <label>Active Thread</label>
+        <div class="value" id="detail-thread">—</div>
+      </div>
+      <div class="detail-item">
+        <label>Active Turn</label>
+        <div class="value" id="detail-turn">—</div>
+      </div>
+      <div class="detail-item">
+        <label>Events</label>
+        <div class="value" id="detail-events">0</div>
+      </div>
+      <div class="detail-item">
+        <label>Uptime</label>
+        <div class="value" id="detail-uptime">0s</div>
+      </div>
+
+      <h2 style="margin-top: 16px;">Recent Files</h2>
+      <div id="file-list" style="font-family: var(--font-mono); font-size: 12px; color: var(--text-dim);">
+        No file changes yet
+      </div>
+    </aside>
+
+    <!-- Footer: Prompt Input -->
+    <footer class="footer">
+      <input
+        type="text"
+        id="prompt-input"
+        placeholder="Send a prompt to Codex..."
+        disabled
+      />
+      <button id="send-btn" disabled>Send</button>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
