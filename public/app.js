@@ -10,9 +10,7 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}`);
 
-  ws.onopen = () => {
-    console.log("[dashboard] Connected to server");
-  };
+  ws.onopen = () => console.log("[dashboard] Connected to server");
 
   ws.onclose = () => {
     console.log("[dashboard] Disconnected, reconnecting...");
@@ -21,8 +19,7 @@ function connect() {
 
   ws.onmessage = (e) => {
     try {
-      const msg = JSON.parse(e.data);
-      handleMessage(msg);
+      handleMessage(JSON.parse(e.data));
     } catch (err) {
       console.error("[dashboard] Parse error:", err);
     }
@@ -81,13 +78,8 @@ function updateConnection(connected) {
 
 function addThread(thread) {
   const list = $("#thread-list");
-  // Clear empty state
-  if (list.querySelector(".empty-state")) {
-    list.innerHTML = "";
-  }
-
-  const existing = list.querySelector(`[data-thread="${thread.id}"]`);
-  if (existing) return;
+  if (list.querySelector(".empty-state")) list.innerHTML = "";
+  if (list.querySelector(`[data-thread="${thread.id}"]`)) return;
 
   const el = document.createElement("div");
   el.className = "thread-item active";
@@ -100,25 +92,27 @@ function addThread(thread) {
 }
 
 function addEvent(event, bulk = false) {
+  const method = event.method || "unknown";
+  const params = event.params || {};
+
+  // Skip noisy internal events
+  if (shouldSkipEvent(method, params)) return;
+
   eventCount++;
   $("#event-count").textContent = `${eventCount} events`;
   $("#detail-events").textContent = eventCount;
 
   const stream = $("#event-stream");
-  // Clear empty state
-  if (stream.querySelector(".empty-state")) {
-    stream.innerHTML = "";
-  }
+  if (stream.querySelector(".empty-state")) stream.innerHTML = "";
 
-  const method = event.method || "unknown";
-  const category = getCategory(method);
   const time = event.timestamp
-    ? new Date(event.timestamp).toLocaleTimeString()
-    : new Date().toLocaleTimeString();
+    ? new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
   // Track files
-  if (event.params?.item?.file?.path) {
-    recentFiles.add(event.params.item.file.path);
+  const filePath = params.item?.file?.path;
+  if (filePath) {
+    recentFiles.add(filePath);
     updateFileList();
   }
 
@@ -133,73 +127,241 @@ function addEvent(event, bulk = false) {
     $("#detail-turn").style.color = "var(--red)";
   }
 
+  const { category, cardClass, icon, label, body } = formatEvent(method, params);
+
   const card = document.createElement("div");
-  card.className = "event-card";
+  card.className = `event-card ${cardClass}`;
   card.innerHTML = `
     <div class="event-header">
-      <span class="event-type ${category}">${method}</span>
+      <span class="event-type ${category}">${icon} ${label}</span>
       <span class="event-time">${time}</span>
     </div>
-    <div class="event-body">${formatBody(event)}</div>
+    <div class="event-body">${body}</div>
   `;
 
   stream.appendChild(card);
+  if (!bulk) card.scrollIntoView({ behavior: "smooth", block: "end" });
+}
 
-  if (!bulk) {
-    card.scrollIntoView({ behavior: "smooth", block: "end" });
+function shouldSkipEvent(method, params) {
+  // Skip raw thread/started (we handle it via state)
+  if (method === "thread/started") return true;
+  // Skip MCP startup noise
+  if (method === "codex/event/mcp_startup_complete") return true;
+  // Skip session configured
+  if (method === "codex/event/session_configured") return true;
+  return false;
+}
+
+function formatEvent(method, params) {
+  // User prompt
+  if (method === "user/prompt") {
+    return {
+      category: "user",
+      cardClass: "user-message",
+      icon: "💬",
+      label: "You",
+      body: `<span class="msg-text">${escHtml(params.text || "")}</span>`,
+    };
   }
-}
 
-function getCategory(method) {
-  if (method.startsWith("turn/")) return "turn";
-  if (method.startsWith("item/stream")) return "stream";
-  if (method.startsWith("item/")) return "item";
-  if (method.includes("error") || method.includes("fail")) return "error";
-  return "item";
-}
+  // Turn started
+  if (method === "turn/started") {
+    return {
+      category: "turn",
+      cardClass: "",
+      icon: "▶️",
+      label: "Turn started",
+      body: `Codex is thinking...`,
+    };
+  }
 
-function formatBody(event) {
-  const p = event.params || {};
+  // Turn completed
+  if (method === "turn/completed") {
+    return {
+      category: "turn",
+      cardClass: "",
+      icon: "✅",
+      label: "Turn completed",
+      body: formatTurnSummary(params),
+    };
+  }
 
-  // File changes
-  if (p.item?.file) {
-    const path = p.item.file.path || "unknown";
-    return `<span class="file-path">${escHtml(path)}</span>`;
+  // Turn failed
+  if (method === "turn/failed") {
+    return {
+      category: "error",
+      cardClass: "",
+      icon: "❌",
+      label: "Turn failed",
+      body: escHtml(params.error?.message || params.reason || "Unknown error"),
+    };
+  }
+
+  // Agent message
+  if (method === "item/created" && params.item?.type === "agentMessage") {
+    const content = extractContent(params.item);
+    return {
+      category: "agent",
+      cardClass: "agent-message",
+      icon: "🤖",
+      label: "Codex",
+      body: `<span class="msg-text">${escHtml(content)}</span>`,
+    };
+  }
+
+  // File change
+  if (method === "item/created" && params.item?.file) {
+    const path = params.item.file.path || "unknown";
+    const action = params.item.file.status || "modified";
+    return {
+      category: "item",
+      cardClass: "file-change",
+      icon: "📄",
+      label: `File ${action}`,
+      body: `<span class="file-path">${escHtml(path)}</span>`,
+    };
   }
 
   // Command execution
-  if (p.item?.command) {
-    return `$ ${escHtml(p.item.command.command || "")}`;
+  if (method === "item/created" && params.item?.type === "command") {
+    const cmd = params.item.command?.command || params.item.command || "";
+    return {
+      category: "stream",
+      cardClass: "command-run",
+      icon: "⚡",
+      label: "Command",
+      body: `<span class="cmd">$ ${escHtml(typeof cmd === "string" ? cmd : JSON.stringify(cmd))}</span>`,
+    };
   }
 
-  // Agent messages
-  if (p.item?.message?.content) {
-    const content = p.item.message.content;
-    if (typeof content === "string") return escHtml(content.slice(0, 500));
-    if (Array.isArray(content)) {
-      return content
-        .map((c) => escHtml(c.text || JSON.stringify(c)).slice(0, 300))
-        .join("\n");
+  // Streaming delta — agent typing
+  if (method === "item/agentMessage/delta") {
+    const delta = params.delta || "";
+    // Append to last agent message card if exists
+    appendDelta(delta);
+    return null; // handled by appendDelta
+  }
+
+  // Item completed
+  if (method === "item/completed") {
+    const item = params.item || {};
+    if (item.type === "command") {
+      const exitCode = item.command?.exitCode ?? item.exitCode;
+      const status = exitCode === 0 ? "✓" : `✗ (exit ${exitCode})`;
+      return {
+        category: exitCode === 0 ? "turn" : "error",
+        cardClass: "",
+        icon: exitCode === 0 ? "✅" : "❌",
+        label: "Command done",
+        body: `${status}`,
+      };
     }
+    // Skip other item/completed silently
+    return null;
   }
 
-  // Stream deltas
-  if (p.delta) {
-    return escHtml(typeof p.delta === "string" ? p.delta : JSON.stringify(p.delta).slice(0, 300));
+  // Approval request
+  if (method === "codex/event/approval_request") {
+    const cmd = params.command?.command || params.command || "unknown";
+    return {
+      category: "stream",
+      cardClass: "",
+      icon: "🔐",
+      label: "Approval needed",
+      body: `<span class="cmd">$ ${escHtml(typeof cmd === "string" ? cmd : JSON.stringify(cmd))}</span>`,
+    };
   }
 
-  // Turn events
-  if (p.turn) {
-    return `Turn: ${truncId(p.turn.id || "?")}`;
-  }
+  // Generic fallback — keep it clean
+  return {
+    category: "item",
+    cardClass: "",
+    icon: "📡",
+    label: shortMethod(method),
+    body: formatCompact(params),
+  };
+}
 
-  // Fallback
-  const raw = JSON.stringify(p, null, 2);
-  return escHtml(raw.length > 500 ? raw.slice(0, 500) + "…" : raw);
+// Append streaming delta to the last agent message
+let lastAgentCard = null;
+
+function appendDelta(delta) {
+  const stream = $("#event-stream");
+  if (!lastAgentCard || !stream.contains(lastAgentCard)) {
+    // Create a new streaming card
+    if (stream.querySelector(".empty-state")) stream.innerHTML = "";
+    lastAgentCard = document.createElement("div");
+    lastAgentCard.className = "event-card agent-message";
+    lastAgentCard.innerHTML = `
+      <div class="event-header">
+        <span class="event-type agent">🤖 Codex</span>
+        <span class="event-time">${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+      </div>
+      <div class="event-body"><span class="msg-text streaming-text"></span></div>
+    `;
+    stream.appendChild(lastAgentCard);
+  }
+  const textEl = lastAgentCard.querySelector(".streaming-text");
+  if (textEl) {
+    textEl.textContent += (typeof delta === "string" ? delta : JSON.stringify(delta));
+  }
+  lastAgentCard.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+// When a non-delta event arrives, clear the streaming target
+const origAddEvent = addEvent;
+
+function extractContent(item) {
+  if (!item) return "";
+  const c = item.message?.content || item.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.map((x) => x.text || "").join("");
+  return JSON.stringify(c || {});
+}
+
+function formatTurnSummary(params) {
+  const turn = params.turn || {};
+  const items = turn.items || [];
+  const files = items.filter((i) => i.file).length;
+  const cmds = items.filter((i) => i.type === "command").length;
+  const msgs = items.filter((i) => i.type === "agentMessage").length;
+  const parts = [];
+  if (msgs) parts.push(`${msgs} message${msgs > 1 ? "s" : ""}`);
+  if (files) parts.push(`${files} file${files > 1 ? "s" : ""}`);
+  if (cmds) parts.push(`${cmds} command${cmds > 1 ? "s" : ""}`);
+  return parts.length ? parts.join(" · ") : "Done";
+}
+
+function shortMethod(method) {
+  // Shorten long method names
+  return method
+    .replace("codex/event/", "")
+    .replace("item/", "")
+    .replace(/([A-Z])/g, " $1")
+    .trim();
+}
+
+function formatCompact(params) {
+  // Show a one-line summary instead of full JSON
+  const keys = Object.keys(params);
+  if (keys.length === 0) return "—";
+  if (keys.length <= 3) {
+    return keys
+      .map((k) => {
+        const v = params[k];
+        const s = typeof v === "string" ? v : JSON.stringify(v);
+        return `${k}: ${escHtml(s.length > 60 ? s.slice(0, 60) + "…" : s)}`;
+      })
+      .join("\n");
+  }
+  const raw = JSON.stringify(params, null, 2);
+  return escHtml(raw.length > 300 ? raw.slice(0, 300) + "…" : raw);
 }
 
 function updateFileList() {
   const el = $("#file-list");
+  if (!el) return;
   el.innerHTML = [...recentFiles]
     .slice(-10)
     .map((f) => `<div style="padding: 2px 0; color: var(--accent);">📄 ${escHtml(f)}</div>`)
@@ -219,10 +381,12 @@ function escHtml(s) {
 
 // Uptime ticker
 setInterval(() => {
+  const el = $("#detail-uptime");
+  if (!el) return;
   const secs = Math.floor((Date.now() - startTime) / 1000);
   const m = Math.floor(secs / 60);
   const s = secs % 60;
-  $("#detail-uptime").textContent = m > 0 ? `${m}m ${s}s` : `${s}s`;
+  el.textContent = m > 0 ? `${m}m ${s}s` : `${s}s`;
 }, 1000);
 
 // Prompt input
@@ -243,7 +407,9 @@ function sendPrompt() {
   ws.send(JSON.stringify({ type: "prompt", text }));
   input.value = "";
 
-  // Show user message in stream
+  // Reset streaming target
+  lastAgentCard = null;
+
   addEvent({
     method: "user/prompt",
     params: { text },
@@ -251,5 +417,4 @@ function sendPrompt() {
   });
 }
 
-// Go
 connect();
