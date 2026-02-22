@@ -445,7 +445,7 @@ body {
     z-index: 100;
     border-right: 1px solid var(--border);
     box-shadow: 4px 0 20px rgba(0,0,0,0.5);
-    padding-top: calc(12px + env(safe-area-inset-top, 0px));
+    padding-top: calc(52px + env(safe-area-inset-top, 0px));
   }
   .sidebar.open { display: block; }
   .sidebar-backdrop {
