@@ -200,7 +200,7 @@ async function createNewThread() {
   if (!codexProc || !agentState.connected) return;
   try {
     const threadResult = await sendToCodex("thread/start", {
-      model: "gpt-5.1-codex",
+      model: "gpt-5.3-codex",
     });
     if (threadResult?.thread?.id) {
       const id = threadResult.thread.id;
