@@ -114,27 +114,8 @@ function addEvent(event, bulk = false) {
       }, (card) => { lastThinkingCard = card; });
       return;
     }
-    if (type === "webSearch") {
-      const query = params.item.query || "";
-      renderCard(event, bulk, {
-        category: "stream", cardClass: "tool-call-card collapsible", icon: "🔍",
-        label: "Web Search",
-        body: query ? `<span class="tool-name">${esc(query)}</span>` : `<span class="tool-args">Searching…</span>`,
-        collapsible: true,
-      });
-      return;
-    }
-    if (type === "commandExecution") {
-      const cmd = params.item.call?.command || params.item.command || "";
-      const cmdStr = typeof cmd === "string" ? cmd : JSON.stringify(cmd);
-      renderCard(event, bulk, {
-        category: "stream", cardClass: "tool-call-card collapsible", icon: "⚡",
-        label: "Command",
-        body: cmdStr ? `<span class="cmd">$ ${esc(cmdStr)}</span>` : `<span class="tool-args">Executing…</span>`,
-        collapsible: true,
-      });
-      return;
-    }
+    // webSearch and commandExecution — skip started, show completed only
+    if (type === "webSearch" || type === "commandExecution") return;
     // Skip all other item/started types (userMessage, agentMessage, etc.)
     return;
   }
@@ -174,29 +155,33 @@ function addEvent(event, bulk = false) {
     if (item.type === "webSearch") {
       const query = item.query || "";
       const action = item.action;
+      let label = "🔍 Web Search";
       let body = esc(query);
       if (action?.type === "openPage" && action.url) {
         body += `\n<span class="tool-args">→ ${esc(action.url)}</span>`;
       }
       renderCard(event, bulk, {
         category: "stream", cardClass: "tool-call-card collapsible", icon: "🔍",
-        label: "Search done", body, collapsible: true,
+        label: "Web Search", body, collapsible: true,
       });
       return;
     }
     if (item.type === "commandExecution") {
       const exitCode = item.exitCode ?? item.command?.exitCode;
       const output = item.output || "";
+      const cmd = item.call?.command || item.command || "";
+      const cmdStr = typeof cmd === "string" ? cmd : JSON.stringify(cmd);
       const ok = exitCode === 0;
-      let body = ok ? "✓" : `✗ (exit ${exitCode})`;
+      let body = cmdStr ? `<span class="cmd">$ ${esc(cmdStr)}</span>\n` : "";
+      body += ok ? "✓" : `✗ (exit ${exitCode})`;
       if (output) {
-        const trimmed = output.length > 300 ? output.slice(0, 300) + "…" : output;
+        const trimmed = output.length > 500 ? output.slice(0, 500) + "…" : output;
         body += `\n<span class="tool-args">${esc(trimmed)}</span>`;
       }
       renderCard(event, bulk, {
         category: ok ? "turn" : "error",
-        cardClass: ok ? "tool-call-card collapsible" : "tool-call-card collapsible",
-        icon: ok ? "✅" : "❌", label: "Command done", body, collapsible: !!output,
+        cardClass: "tool-call-card collapsible",
+        icon: ok ? "⚡" : "❌", label: "Command", body, collapsible: true,
       });
       return;
     }
