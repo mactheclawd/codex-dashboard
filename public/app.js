@@ -5,6 +5,8 @@ const startTime = Date.now();
 let eventCount = 0;
 let ws = null;
 const recentFiles = new Set();
+let lastTurnStartId = null;
+let lastTurnCompleteId = null;
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -144,14 +146,19 @@ function addEvent(event, bulk = false) {
 }
 
 function shouldSkipEvent(method, params) {
-  // Skip all codex/event/* duplicates — we use the item/* and turn/* versions
+  // Skip ALL codex/event/* — duplicates of item/*/turn/* events
   if (method.startsWith("codex/event/")) return true;
   // Skip thread-level noise
   if (method === "thread/started") return true;
   if (method === "thread/tokenUsage/updated") return true;
   if (method === "account/rateLimits/updated") return true;
-  // Skip item/started (wait for item/completed or deltas)
+  // Skip item lifecycle noise
   if (method === "item/started") return true;
+  if (method === "item/created") return true;
+  // Skip reasoning summaries
+  if (method.startsWith("reasoning/")) return true;
+  // Skip user message echo (we already show it from prompt input)
+  if (method === "item/completed" && params.item?.type === "userMessage") return true;
   return false;
 }
 
@@ -167,8 +174,12 @@ function formatEvent(method, params) {
     };
   }
 
-  // Turn started
+  // Turn started — deduplicate
   if (method === "turn/started") {
+    const tid = params.turn?.id || params.turnId;
+    if (tid && tid === lastTurnStartId) return null;
+    lastTurnStartId = tid;
+    lastAgentCard = null; // reset streaming
     return {
       category: "turn",
       cardClass: "",
@@ -178,8 +189,12 @@ function formatEvent(method, params) {
     };
   }
 
-  // Turn completed
+  // Turn completed — deduplicate
   if (method === "turn/completed") {
+    const tid = params.turn?.id || params.turnId;
+    if (tid && tid === lastTurnCompleteId) return null;
+    lastTurnCompleteId = tid;
+    lastAgentCard = null; // reset streaming
     return {
       category: "turn",
       cardClass: "",

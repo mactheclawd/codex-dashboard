@@ -205,7 +205,19 @@ function startCodex() {
   }, 500);
 }
 
+// Skip duplicate codex/event/* on server side to reduce bandwidth
+const SKIP_PREFIXES = [
+  "codex/event/",
+  "account/rateLimits/",
+  "thread/tokenUsage/",
+];
+
 function handleNotification(method, params) {
+  // Filter noisy duplicates server-side
+  for (const prefix of SKIP_PREFIXES) {
+    if (method.startsWith(prefix)) return;
+  }
+
   const event = { method, params };
   pushEvent(event);
 
