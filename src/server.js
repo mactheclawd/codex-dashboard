@@ -278,10 +278,8 @@ function startCodex() {
       agentState.connected = true;
       broadcast({ type: "status", data: { connected: true } });
 
-      // If no threads exist, create one automatically for convenience
-      if (Object.keys(agentState.threads).length === 0) {
-        await createNewThread();
-      }
+      // Always create a fresh thread on startup (old threads are history-only)
+      await createNewThread();
     } catch (e) {
       console.error("[codex] Handshake failed:", e.message);
     }
