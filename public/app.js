@@ -36,8 +36,13 @@ function handleMessage(msg) {
 
 function applyState(state) {
   updateConnection(state.connected);
-  seenEventKeys.clear(); // reset dedup on reconnect
+  // Reset everything for clean replay
+  seenEventKeys.clear();
   eventCount = 0;
+  lastAgentCard = null;
+  lastThinkingCard = null;
+  const stream = $("#event-stream");
+  stream.innerHTML = "";
   if (state.activeThreadId) $("#detail-thread").textContent = truncId(state.activeThreadId);
   if (state.events) state.events.forEach((e) => addEvent(e, true));
   Object.values(state.threads || {}).forEach(addThread);
