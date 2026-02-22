@@ -129,17 +129,28 @@ function addEvent(event, bulk = false) {
     $("#detail-turn").style.color = "var(--red)";
   }
 
-  const { category, cardClass, icon, label, body } = formatEvent(method, params);
+  const result = formatEvent(method, params);
+  if (!result) return;
+  const { category, cardClass, icon, label, body, collapsible } = result;
 
   const card = document.createElement("div");
   card.className = `event-card ${cardClass}`;
+
+  const toggleHtml = collapsible ? '<span class="collapse-toggle">▶</span>' : '';
+
   card.innerHTML = `
     <div class="event-header">
-      <span class="event-type ${category}">${icon} ${label}</span>
+      <span class="event-type ${category}">${toggleHtml}${icon} ${label}</span>
       <span class="event-time">${time}</span>
     </div>
     <div class="event-body">${body}</div>
   `;
+
+  if (collapsible) {
+    card.querySelector('.event-header').addEventListener('click', () => {
+      card.classList.toggle('expanded');
+    });
+  }
 
   stream.appendChild(card);
   if (!bulk) card.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -155,8 +166,7 @@ function shouldSkipEvent(method, params) {
   // Skip item lifecycle noise
   if (method === "item/started") return true;
   if (method === "item/created") return true;
-  // Skip reasoning summaries
-  if (method.startsWith("reasoning/")) return true;
+  // Show reasoning/thinking events (collapsible cards)
   // Skip user message echo (we already show it from prompt input)
   if (method === "item/completed" && params.item?.type === "userMessage") return true;
   return false;
@@ -302,6 +312,78 @@ function formatEvent(method, params) {
       icon: "🔐",
       label: "Approval needed",
       body: `<span class="cmd">$ ${escHtml(typeof cmd === "string" ? cmd : JSON.stringify(cmd))}</span>`,
+    };
+  }
+
+  // Thinking / reasoning
+  if (method.startsWith("reasoning/") || method === "item/thinking" || method === "item/agentMessage/thinking") {
+    const text = params.text || params.summary || params.content || JSON.stringify(params);
+    return {
+      category: "stream",
+      cardClass: "thinking-card collapsible",
+      icon: "💭",
+      label: "Thinking",
+      body: `${escHtml(typeof text === "string" ? text : JSON.stringify(text))}`,
+      collapsible: true,
+    };
+  }
+
+  // Tool calls
+  if (method === "item/created" && params.item?.type === "toolCall") {
+    const name = params.item.toolCall?.name || params.item.name || "unknown";
+    const args = params.item.toolCall?.arguments || params.item.arguments || {};
+    const argsStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
+    return {
+      category: "stream",
+      cardClass: "tool-call-card collapsible",
+      icon: "🔧",
+      label: `Tool: ${name}`,
+      body: `<span class="tool-name">${escHtml(name)}</span>\n<span class="tool-args">${escHtml(argsStr.length > 500 ? argsStr.slice(0, 500) + "…" : argsStr)}</span>`,
+      collapsible: true,
+    };
+  }
+
+  // Tool call completed
+  if (method === "item/completed" && params.item?.type === "toolCall") {
+    const name = params.item.toolCall?.name || params.item.name || "tool";
+    const output = params.item.toolCall?.output || params.item.output || "";
+    const outputStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
+    return {
+      category: "stream",
+      cardClass: "tool-call-card collapsible",
+      icon: "🔧",
+      label: `Tool done: ${name}`,
+      body: `<span class="tool-args">${escHtml(outputStr.length > 500 ? outputStr.slice(0, 500) + "…" : outputStr)}</span>`,
+      collapsible: true,
+    };
+  }
+
+  // Function calls (alternative format)
+  if (method === "item/created" && params.item?.type === "functionCall") {
+    const name = params.item.name || params.item.functionCall?.name || "unknown";
+    const args = params.item.arguments || params.item.functionCall?.arguments || {};
+    const argsStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
+    return {
+      category: "stream",
+      cardClass: "tool-call-card collapsible",
+      icon: "🔧",
+      label: `Call: ${name}`,
+      body: `<span class="tool-name">${escHtml(name)}</span>\n<span class="tool-args">${escHtml(argsStr.length > 500 ? argsStr.slice(0, 500) + "…" : argsStr)}</span>`,
+      collapsible: true,
+    };
+  }
+
+  if (method === "item/completed" && params.item?.type === "functionCall") {
+    const name = params.item.name || "function";
+    const output = params.item.output || "";
+    const outputStr = typeof output === "string" ? output : JSON.stringify(output, null, 2);
+    return {
+      category: "stream",
+      cardClass: "tool-call-card collapsible",
+      icon: "🔧",
+      label: `Done: ${name}`,
+      body: `<span class="tool-args">${escHtml(outputStr.length > 500 ? outputStr.slice(0, 500) + "…" : outputStr)}</span>`,
+      collapsible: true,
     };
   }
 

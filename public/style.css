@@ -220,6 +220,57 @@ body {
   border-left: 3px solid var(--orange);
 }
 
+/* Collapsible cards (thinking, tool calls) */
+.event-card.collapsible .event-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.event-card.collapsible .collapse-toggle {
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.2s ease;
+  display: inline-block;
+  margin-right: 4px;
+}
+
+.event-card.collapsible.expanded .collapse-toggle {
+  transform: rotate(90deg);
+}
+
+.event-card.collapsible .event-body {
+  display: none;
+}
+
+.event-card.collapsible.expanded .event-body {
+  display: block;
+}
+
+.event-card.thinking-card {
+  border-left: 3px solid #8b949e;
+  opacity: 0.8;
+}
+
+.event-card.thinking-card .event-body {
+  font-style: italic;
+  color: #8b949e;
+}
+
+.event-card.tool-call-card {
+  border-left: 3px solid var(--orange);
+}
+
+.event-card.tool-call-card .tool-name {
+  color: var(--orange);
+  font-weight: 600;
+}
+
+.event-card.tool-call-card .tool-args {
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
 /* Details panel */
 .details {
   background: var(--bg-card);
