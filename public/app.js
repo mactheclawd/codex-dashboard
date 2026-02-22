@@ -144,12 +144,14 @@ function addEvent(event, bulk = false) {
 }
 
 function shouldSkipEvent(method, params) {
-  // Skip raw thread/started (we handle it via state)
+  // Skip all codex/event/* duplicates — we use the item/* and turn/* versions
+  if (method.startsWith("codex/event/")) return true;
+  // Skip thread-level noise
   if (method === "thread/started") return true;
-  // Skip MCP startup noise
-  if (method === "codex/event/mcp_startup_complete") return true;
-  // Skip session configured
-  if (method === "codex/event/session_configured") return true;
+  if (method === "thread/tokenUsage/updated") return true;
+  if (method === "account/rateLimits/updated") return true;
+  // Skip item/started (wait for item/completed or deltas)
+  if (method === "item/started") return true;
   return false;
 }
 
@@ -257,7 +259,22 @@ function formatEvent(method, params) {
         body: `${status}`,
       };
     }
-    // Skip other item/completed silently
+    // Agent message completed — if we were streaming, finalize. Otherwise show it.
+    if (item.type === "agentMessage" && item.text) {
+      // If we have a streaming card, just leave it (already has the text)
+      if (lastAgentCard) {
+        lastAgentCard = null; // reset for next message
+        return null;
+      }
+      // Otherwise show the full message
+      return {
+        category: "agent",
+        cardClass: "agent-message",
+        icon: "🤖",
+        label: "Codex",
+        body: `<span class="msg-text">${escHtml(item.text)}</span>`,
+      };
+    }
     return null;
   }
 
